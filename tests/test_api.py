@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.gatekeeper import Gatekeeper
-from app.main import Settings, create_app
+from app.main import Settings, code_pseudonym, create_app, sanitize_log_path
 
 # Zero delay on misses: the production one-second pause is an anti-guessing
 # measure, not behaviour worth waiting for in tests.
@@ -136,10 +136,78 @@ def test_events_are_logged_without_the_throw_content(client, capsys):
     client.post(f"/api/throws/{code}")
 
     out = capsys.readouterr().out
-    assert f"event=created code={code}" in out
-    assert f"event=read code={code}" in out
+    pseudonym = code_pseudonym(code)
+    # The pair is still correlatable: created and read carry the same pseudonym.
+    assert f"event=created code={pseudonym}" in out
+    assert f"event=read code={pseudonym}" in out
     assert "ts=" in out
     assert "top secret payload" not in out
+
+
+def test_the_raw_code_never_reaches_the_event_log(client, capsys):
+    code = throw(client, "another secret")
+    client.post(f"/api/throws/{code}")
+
+    out = capsys.readouterr().out
+    # The shared secret must never appear verbatim; only its hash prefix does.
+    assert code not in out
+    assert code_pseudonym(code) in out
+
+
+def test_the_pseudonym_is_a_short_stable_hash_prefix():
+    # Deterministic and short: same code -> same pseudonym, on every process.
+    once = code_pseudonym("red-fox")
+    again = code_pseudonym("red-fox")
+    assert once == again
+    assert once != code_pseudonym("blue-jay")
+    assert len(once) == 12
+    assert "red-fox" not in once
+
+
+def test_the_access_log_path_is_pseudonymised_for_a_receiver_request():
+    # uvicorn logs the request line verbatim; a receiver GET is `/{code}` and a
+    # read POST is `/api/throws/{code}`. Neither may leak the code.
+    receiver = sanitize_log_path("/red-fox")
+    assert "red-fox" not in receiver
+    assert receiver == "/" + code_pseudonym("red-fox")
+
+    read = sanitize_log_path("/api/throws/red-fox?x=1")
+    assert "red-fox" not in read
+    assert read == "/api/throws/" + code_pseudonym("red-fox")
+
+    # Code-free routes are logged untouched.
+    for safe in ("/", "/healthz", "/robots.txt", "/api/throws"):
+        assert sanitize_log_path(safe) == safe
+
+
+def test_the_access_log_filter_redacts_the_code_in_the_request_line():
+    # Exercise the real filter on a record shaped exactly as uvicorn builds it.
+    import logging
+
+    from app.main import _AccessLogRedactor
+
+    record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("1.2.3.4:5", "GET", "/red-fox", "1.1", 405),
+        exc_info=None,
+    )
+    assert _AccessLogRedactor().filter(record) is True
+    rendered = record.getMessage()
+    assert "red-fox" not in rendered
+    assert code_pseudonym("red-fox") in rendered
+
+
+def test_the_redactor_is_installed_on_the_uvicorn_access_logger():
+    import logging
+
+    from app.main import _AccessLogRedactor
+
+    access_logger = logging.getLogger("uvicorn.access")
+    assert any(isinstance(f, _AccessLogRedactor) for f in access_logger.filters)
 
 
 def test_default_settings_work_without_env(monkeypatch):
