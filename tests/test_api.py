@@ -222,6 +222,57 @@ def test_a_hammering_ip_gets_tarpitted_but_a_valid_read_still_lands_first():
         assert c.post("/api/throws/never-existed").status_code == 404
 
 
+def test_trusted_proxy_gives_each_forwarded_ip_its_own_budget():
+    # Behind a proxy every request shares one socket peer; the limiter must
+    # instead charge the forwarded client, so two forwarded IPs are independent.
+    gate = Gatekeeper(miss_budget=3)
+    settings = Settings(miss_delay_ms=0, trusted_proxy=True)
+    app = create_app(settings, gatekeeper=gate)
+    with TestClient(app) as c:
+        for _ in range(4):
+            c.post("/api/throws/never-existed", headers={"X-Forwarded-For": "203.0.113.7"})
+        c.post("/api/throws/never-existed", headers={"X-Forwarded-For": "198.51.100.9"})
+
+    # State is keyed by the forwarded IPs, not the shared socket peer.
+    assert "203.0.113.7" in gate._ip_misses
+    assert "198.51.100.9" in gate._ip_misses
+
+
+def test_cf_connecting_ip_wins_when_behind_a_trusted_proxy():
+    gate = Gatekeeper()
+    app = create_app(Settings(miss_delay_ms=0, trusted_proxy=True), gatekeeper=gate)
+    with TestClient(app) as c:
+        c.post(
+            "/api/throws/never-existed",
+            headers={"CF-Connecting-IP": "203.0.113.50", "X-Forwarded-For": "10.9.9.9"},
+        )
+    assert "203.0.113.50" in gate._ip_misses
+    assert "10.9.9.9" not in gate._ip_misses
+
+
+def test_forwarded_header_is_ignored_when_not_behind_a_proxy():
+    # trusted_proxy defaults to False: the header is attacker-controlled and
+    # must never move the budget off the real socket peer.
+    gate = Gatekeeper()
+    app = create_app(Settings(miss_delay_ms=0), gatekeeper=gate)
+    with TestClient(app) as c:
+        c.post("/api/throws/never-existed", headers={"X-Forwarded-For": "203.0.113.7"})
+    assert "203.0.113.7" not in gate._ip_misses
+    assert "testclient" in gate._ip_misses  # the TestClient socket peer
+
+
+def test_proxy_settings_come_from_env():
+    settings = Settings.from_env(
+        {"THROW_TRUSTED_PROXY": "true", "THROW_FORWARDED_HEADER": "X-Real-IP"}
+    )
+    assert settings.trusted_proxy is True
+    assert settings.forwarded_header == "X-Real-IP"
+
+    off = Settings.from_env({})
+    assert off.trusted_proxy is False
+    assert off.forwarded_header == "X-Forwarded-For"
+
+
 def test_a_full_store_answers_busy_rather_than_failing(client):
     from app.throwstore import ThrowStore
 

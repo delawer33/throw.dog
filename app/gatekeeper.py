@@ -31,6 +31,7 @@ DEFAULT_WINDOW_SECONDS: float = 60.0
 DEFAULT_MISS_BUDGET: int = 10
 DEFAULT_GLOBAL_WINDOW_SECONDS: float = 60.0
 DEFAULT_GLOBAL_MISS_THRESHOLD: int = 100
+DEFAULT_MAX_TRACKED_IPS: int = 4096
 
 
 class ReadOutcome(Enum):
@@ -50,6 +51,10 @@ class Gatekeeper:
         global_window_seconds: length of the global sliding window of misses.
         global_miss_threshold: how many misses across all IPs, inside the
             global window, engage the global tarpit.
+        max_tracked_ips: soft ceiling on distinct IPs held in per-IP state.
+            Once the map grows past this, a sweep reclaims every bucket whose
+            window has fully drained — so a spray botnet of one-shot IPs cannot
+            grow the map without bound and turn the gate into a memory-DoS.
         clock: callable returning seconds as a float; monotonic by default so
             wall-clock jumps cannot forgive or condemn an IP early.
     """
@@ -60,6 +65,7 @@ class Gatekeeper:
         miss_budget: int = DEFAULT_MISS_BUDGET,
         global_window_seconds: float = DEFAULT_GLOBAL_WINDOW_SECONDS,
         global_miss_threshold: int = DEFAULT_GLOBAL_MISS_THRESHOLD,
+        max_tracked_ips: int = DEFAULT_MAX_TRACKED_IPS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if window_seconds <= 0:
@@ -70,10 +76,13 @@ class Gatekeeper:
             raise ValueError("global_window_seconds must be positive")
         if global_miss_threshold < 1:
             raise ValueError("global_miss_threshold must be at least 1")
+        if max_tracked_ips < 1:
+            raise ValueError("max_tracked_ips must be at least 1")
         self._window_seconds = float(window_seconds)
         self._miss_budget = miss_budget
         self._global_window_seconds = float(global_window_seconds)
         self._global_miss_threshold = global_miss_threshold
+        self._max_tracked_ips = max_tracked_ips
         self._clock = clock
         self._ip_misses: dict[str, Deque[float]] = {}
         self._global_misses: Deque[float] = deque()
@@ -86,6 +95,7 @@ class Gatekeeper:
         """
         now = self._clock()
         self._prune_global(now)
+        self._sweep_ips_if_crowded(now)
         if len(self._global_misses) >= self._global_miss_threshold:
             return False
         recent = self._ip_misses.get(ip)
@@ -107,6 +117,7 @@ class Gatekeeper:
         self._prune_ip(ip, recent, now)
         self._global_misses.append(now)
         self._prune_global(now)
+        self._sweep_ips_if_crowded(now)
 
     def _prune_ip(self, ip: str, recent: Deque[float], now: float) -> None:
         """Drop this IP's misses that have aged out of the window."""
@@ -115,6 +126,26 @@ class Gatekeeper:
             recent.popleft()
         if not recent:
             # No stale one-entry deques left lying around per IP forever.
+            del self._ip_misses[ip]
+
+    def _sweep_ips_if_crowded(self, now: float) -> None:
+        """Reclaim fully-drained per-IP buckets once the map is crowded.
+
+        A spray botnet leaves a one-shot bucket per source IP that ``record``
+        alone never revisits, so those buckets would pile up forever. This
+        sweep — O(tracked IPs), and only when the map exceeds its ceiling —
+        drops every bucket whose newest miss has already aged out of the
+        window, bounding memory to genuinely active IPs.
+        """
+        if len(self._ip_misses) <= self._max_tracked_ips:
+            return
+        cutoff = now - self._window_seconds
+        stale = [
+            ip
+            for ip, recent in self._ip_misses.items()
+            if not recent or recent[-1] <= cutoff
+        ]
+        for ip in stale:
             del self._ip_misses[ip]
 
     def _prune_global(self, now: float) -> None:
