@@ -131,6 +131,24 @@ _STYLE: Final = """
     transform: rotate(1deg); margin-top: 22px;
   }
   .hint { opacity: .7; font-size: 13px; font-weight: 600; margin-top: 12px; }
+
+  /* Pro fake-door */
+  .prochip {
+    font: 900 14px system-ui, sans-serif; text-transform: uppercase; letter-spacing: 1px;
+    background: var(--mustard); color: var(--ink); border: 3px solid var(--ink);
+    border-radius: 999px; box-shadow: 4px 4px 0 var(--ink); cursor: pointer;
+    padding: 8px 18px; margin-top: 22px; margin-right: 10px; transform: rotate(-2deg);
+    transition: transform .08s, box-shadow .08s;
+  }
+  .prochip:hover { background: #ffc233; }
+  .prochip:active { transform: translate(4px, 4px) rotate(-2deg); box-shadow: 1px 1px 0 var(--ink); }
+  .prodoor { margin-top: 22px; }
+  .proinput {
+    width: 100%; border: 2px dashed #18120744; border-radius: 10px;
+    font: 600 15px system-ui, sans-serif; padding: 14px; background: #FFFDF6;
+    outline: none; color: var(--ink); margin-top: 12px;
+  }
+  .proinput:focus { border-color: var(--ink); background: #fff; }
   .error {
     color: var(--red); font-weight: 800; font-size: 14px; margin-top: 12px;
     background: #fff; border: 2px solid var(--red); border-radius: 10px; padding: 10px 12px;
@@ -342,7 +360,20 @@ _SENDER_TMPL: Final = _HEAD + """<body>
     </div>
   </div>
 
+  <button class="prochip" id="prochip" type="button" data-ev="pro_click">@@proChip@@</button>
   <span class="chip">@@chip@@</span>
+
+  <div class="card prodoor" id="prodoor" hidden>
+    <p class="donelabel">@@proTitle@@</p>
+    <p class="hint">@@proPerks@@</p>
+    <div id="proform">
+      <input class="proinput" id="proemail" type="email" inputmode="email"
+             autocomplete="email" placeholder="@@proEmailPlaceholder@@">
+      <button class="btn wide" id="prosubmit" type="button" data-ev="pro_email">@@proSubmit@@</button>
+      <p id="proerror" class="error" hidden></p>
+    </div>
+    <p id="prothanks" class="donelabel" hidden></p>
+  </div>
 
   <footer class="foot">
     <a href="/terms">@@footerTerms@@</a>
@@ -441,12 +472,48 @@ var T = @@__T__@@;
     text.focus();
   });
 
-  // Pro fake-door funnel hooks. The Pro UI lives in another slice, so these are
-  // guarded: they attach only when the elements exist and are no-ops otherwise.
-  var proClick = document.getElementById('pro-click');
-  if (proClick) { proClick.addEventListener('click', function () { tdTrack('pro_click'); }); }
-  var proEmail = document.getElementById('pro-email');
-  if (proEmail) { proEmail.addEventListener('submit', function () { tdTrack('pro_email'); }); }
+  // Pro fake-door: chip reveals the "coming soon" panel; the email is POSTed to
+  // /api/pro-interest (a POST body, never the URL, so it stays out of any log).
+  // Funnel events (pro_click / pro_email) fire via tdTrack (cookieless Umami,
+  // a no-op when the tracker is absent).
+  var prochip = document.getElementById('prochip');
+  var prodoor = document.getElementById('prodoor');
+  var proemail = document.getElementById('proemail');
+  var proerror = document.getElementById('proerror');
+  var prothanks = document.getElementById('prothanks');
+  var proform = document.getElementById('proform');
+  var probusy = false;
+
+  prochip.addEventListener('click', function () {
+    prodoor.hidden = !prodoor.hidden;
+    if (!prodoor.hidden) { tdTrack('pro_click'); proemail.focus(); }
+  });
+
+  document.getElementById('prosubmit').addEventListener('click', function () {
+    if (probusy) { return; }
+    var value = (proemail.value || '').trim();
+    if (value.indexOf('@') < 1 || value.length > 254) {
+      proerror.textContent = T.proBadEmail; proerror.hidden = false; return;
+    }
+    probusy = true; proerror.hidden = true;
+    fetch('/api/pro-interest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: value })
+    }).then(function (response) {
+      if (response.status === 400) { throw new Error(T.proBadEmail); }
+      if (!response.ok) { throw new Error(T.proNet); }
+      proform.hidden = true;
+      prothanks.textContent = T.proThanks;
+      prothanks.hidden = false;
+      tdTrack('pro_email');
+    }).catch(function (err) {
+      proerror.textContent = err && err.message ? err.message : T.proNet;
+      proerror.hidden = false;
+    }).then(function () {
+      probusy = false;
+    });
+  });
 })();
 </script>
 </body>
@@ -563,6 +630,14 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         # The pages they point to (/terms, /privacy) are EN-only (launch audience).
         "footerTerms": "Terms",
         "footerPrivacy": "Privacy",
+        "proChip": "✨ Pro",
+        "proTitle": "Pro coming soon, $4/mo",
+        "proPerks": "Bigger files, longer TTL, custom codes. Want it? Leave your email.",
+        "proEmailPlaceholder": "you@example.com",
+        "proSubmit": "notify me",
+        "proThanks": "thanks, you'll be first to know",
+        "proBadEmail": "That doesn't look like an email.",
+        "proNet": "Network problem. Try again.",
     },
     "ru": {
         "taglineA": "Кинь.",
@@ -588,6 +663,14 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "selectFallback": "нажми Ctrl+C / удерживай, чтобы скопировать",
         "footerTerms": "Условия",
         "footerPrivacy": "Приватность",
+        "proChip": "✨ Pro",
+        "proTitle": "Pro скоро, $4/мес",
+        "proPerks": "Больше размер, дольше хранение, свои коды. Нужно? Оставь имейл.",
+        "proEmailPlaceholder": "you@example.com",
+        "proSubmit": "сообщить мне",
+        "proThanks": "спасибо, сообщим первыми",
+        "proBadEmail": "Это не похоже на имейл.",
+        "proNet": "Проблема сети. Попробуй ещё раз.",
     },
 }
 
