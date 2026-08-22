@@ -22,6 +22,14 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from app.codewords import normalize
+from app.gatekeeper import (
+    DEFAULT_GLOBAL_MISS_THRESHOLD,
+    DEFAULT_GLOBAL_WINDOW_SECONDS,
+    DEFAULT_MISS_BUDGET,
+    DEFAULT_WINDOW_SECONDS,
+    Gatekeeper,
+    ReadOutcome,
+)
 from app.pages import RECEIVER_PAGE, ROBOTS_TXT, SENDER_PAGE
 from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 
@@ -47,6 +55,10 @@ class Settings:
     max_bytes: int = DEFAULT_MAX_BYTES
     miss_delay_ms: int = DEFAULT_MISS_DELAY_MS
     sweep_interval_seconds: float = DEFAULT_SWEEP_INTERVAL_SECONDS
+    gate_window_seconds: float = DEFAULT_WINDOW_SECONDS
+    gate_miss_budget: int = DEFAULT_MISS_BUDGET
+    gate_global_window_seconds: float = DEFAULT_GLOBAL_WINDOW_SECONDS
+    gate_global_miss_threshold: int = DEFAULT_GLOBAL_MISS_THRESHOLD
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -57,6 +69,16 @@ class Settings:
             miss_delay_ms=int(source.get("THROW_MISS_DELAY_MS", DEFAULT_MISS_DELAY_MS)),
             sweep_interval_seconds=float(
                 source.get("THROW_SWEEP_INTERVAL_SECONDS", DEFAULT_SWEEP_INTERVAL_SECONDS)
+            ),
+            gate_window_seconds=float(
+                source.get("THROW_GATE_WINDOW_SECONDS", DEFAULT_WINDOW_SECONDS)
+            ),
+            gate_miss_budget=int(source.get("THROW_GATE_MISS_BUDGET", DEFAULT_MISS_BUDGET)),
+            gate_global_window_seconds=float(
+                source.get("THROW_GATE_GLOBAL_WINDOW_SECONDS", DEFAULT_GLOBAL_WINDOW_SECONDS)
+            ),
+            gate_global_miss_threshold=int(
+                source.get("THROW_GATE_GLOBAL_MISS_THRESHOLD", DEFAULT_GLOBAL_MISS_THRESHOLD)
             ),
         )
 
@@ -70,9 +92,19 @@ def log_event(event: str, code: str) -> None:
     print(f"event={event} code={code} ts={timestamp}", file=sys.stdout, flush=True)
 
 
-def create_app(settings: Settings | None = None, store: ThrowStore | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    store: ThrowStore | None = None,
+    gatekeeper: Gatekeeper | None = None,
+) -> FastAPI:
     config = settings or Settings.from_env()
     throws = store or ThrowStore(ttl_seconds=config.ttl_seconds)
+    gate = gatekeeper or Gatekeeper(
+        window_seconds=config.gate_window_seconds,
+        miss_budget=config.gate_miss_budget,
+        global_window_seconds=config.gate_global_window_seconds,
+        global_miss_threshold=config.gate_global_miss_threshold,
+    )
     miss_delay_seconds = config.miss_delay_ms / 1000.0
     max_body_bytes = config.max_bytes * _BODY_SLACK_FACTOR + _BODY_SLACK_BYTES
 
@@ -102,6 +134,7 @@ def create_app(settings: Settings | None = None, store: ThrowStore | None = None
     )
     app.state.settings = config
     app.state.store = throws
+    app.state.gatekeeper = gate
 
     @app.middleware("http")
     async def no_index(request: Request, call_next):
@@ -168,13 +201,23 @@ def create_app(settings: Settings | None = None, store: ThrowStore | None = None
         return JSONResponse({"code": code}, status_code=201)
 
     @app.post("/api/throws/{code}")
-    async def take_throw(code: str) -> Response:
+    async def take_throw(code: str, request: Request) -> Response:
+        # The gate decides before the store is ever touched. A tarpitted read
+        # returns the ordinary slow miss — byte-identical — so an attacker over
+        # budget learns nothing about whether the code existed.
+        client_ip = request.client.host if request.client else "unknown"
+        if not gate.allow(client_ip):
+            return await miss()
+
         canonical = normalize(code)
         if canonical is None:
+            gate.record(client_ip, ReadOutcome.MISS)
             return await miss()
         text = throws.take(canonical)
         if text is None:
+            gate.record(client_ip, ReadOutcome.MISS)
             return await miss()
+        gate.record(client_ip, ReadOutcome.HIT)
         log_event("read", canonical)
         return JSONResponse({"text": text})
 
