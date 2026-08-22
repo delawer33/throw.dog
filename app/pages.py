@@ -160,7 +160,7 @@ RECEIVER_PAGE: Final = _HEAD + """<body>
   var target = document.getElementById('text');
   var code = window.location.pathname.replace(/^\\/+/, '').replace(/\\/+$/, '');
 
-  fetch('/api/throws/' + code, { method: 'POST' })
+  fetch('/api/throws/' + encodeURIComponent(code), { method: 'POST' })
     .then(function (response) {
       if (response.status === 404) { throw new Error('no such throw — expired, already read, or never existed'); }
       if (!response.ok) { throw new Error('Something went wrong. Reload to try again.'); }

@@ -10,22 +10,31 @@ container image, not here).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel
 
 from app.codewords import normalize
 from app.pages import RECEIVER_PAGE, ROBOTS_TXT, SENDER_PAGE
-from app.throwstore import ThrowStore
+from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 
 DEFAULT_TTL_SECONDS = 600
 DEFAULT_MAX_BYTES = 65536
 DEFAULT_MISS_DELAY_MS = 1000
+DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0
+
+#: How much raw body we tolerate around a max-size text. JSON escaping can
+#: inflate the payload well past the text it carries, so the body ceiling is
+#: generous — its job is to stop a 100 MB flood, not to police the text size.
+_BODY_SLACK_FACTOR = 8
+_BODY_SLACK_BYTES = 1024
 
 #: One body for every kind of miss — never existed, expired, already read.
 #: Telling them apart would turn code-guessing into a search with feedback.
@@ -37,6 +46,7 @@ class Settings:
     ttl_seconds: float = DEFAULT_TTL_SECONDS
     max_bytes: int = DEFAULT_MAX_BYTES
     miss_delay_ms: int = DEFAULT_MISS_DELAY_MS
+    sweep_interval_seconds: float = DEFAULT_SWEEP_INTERVAL_SECONDS
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -45,11 +55,10 @@ class Settings:
             ttl_seconds=float(source.get("THROW_TTL_SECONDS", DEFAULT_TTL_SECONDS)),
             max_bytes=int(source.get("THROW_MAX_BYTES", DEFAULT_MAX_BYTES)),
             miss_delay_ms=int(source.get("THROW_MISS_DELAY_MS", DEFAULT_MISS_DELAY_MS)),
+            sweep_interval_seconds=float(
+                source.get("THROW_SWEEP_INTERVAL_SECONDS", DEFAULT_SWEEP_INTERVAL_SECONDS)
+            ),
         )
-
-
-class ThrowRequest(BaseModel):
-    text: str
 
 
 def log_event(event: str, code: str) -> None:
@@ -65,8 +74,32 @@ def create_app(settings: Settings | None = None, store: ThrowStore | None = None
     config = settings or Settings.from_env()
     throws = store or ThrowStore(ttl_seconds=config.ttl_seconds)
     miss_delay_seconds = config.miss_delay_ms / 1000.0
+    max_body_bytes = config.max_bytes * _BODY_SLACK_FACTOR + _BODY_SLACK_BYTES
 
-    app = FastAPI(title="throw.dog", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        # Expired throws must not linger in RAM on a quiet instance: nobody
+        # is coming for them, and their plaintext would sit in any dump.
+        async def sweep_forever() -> None:
+            while True:
+                await asyncio.sleep(config.sweep_interval_seconds)
+                throws.purge_expired()
+
+        sweeper = asyncio.create_task(sweep_forever())
+        try:
+            yield
+        finally:
+            sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweeper
+
+    app = FastAPI(
+        title="throw.dog",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     app.state.settings = config
     app.state.store = throws
 
@@ -90,18 +123,47 @@ def create_app(settings: Settings | None = None, store: ThrowStore | None = None
     async def robots() -> PlainTextResponse:
         return PlainTextResponse(ROBOTS_TXT)
 
+    def too_big(size: int | None = None) -> JSONResponse:
+        measured = "the request body" if size is None else f"{size} bytes"
+        return JSONResponse(
+            {"detail": f"text is too big: {measured}, limit is {config.max_bytes}"},
+            status_code=413,
+        )
+
     @app.post("/api/throws")
-    async def create_throw(payload: ThrowRequest) -> JSONResponse:
-        text = payload.text
+    async def create_throw(request: Request) -> JSONResponse:
+        # Read the body ourselves: letting the framework parse it first would
+        # buffer a 100 MB flood in full before we ever got to the 64 KB limit.
+        declared = request.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > max_body_bytes:
+            return too_big()
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > max_body_bytes:
+                return too_big()
+
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return JSONResponse({"detail": "malformed request"}, status_code=400)
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            return JSONResponse(
+                {"detail": "expected a JSON object with a text field"}, status_code=400
+            )
+
+        text = payload["text"]
         if not text.strip():
             return JSONResponse({"detail": "nothing to throw"}, status_code=400)
         size = len(text.encode("utf-8"))
         if size > config.max_bytes:
+            return too_big(size)
+        try:
+            code = throws.put(text)
+        except (StoreFull, OutOfCodes):
             return JSONResponse(
-                {"detail": f"text is too big: {size} bytes, limit is {config.max_bytes}"},
-                status_code=413,
+                {"detail": "service is busy, try again in a minute"}, status_code=503
             )
-        code = throws.put(text)
         log_event("created", code)
         return JSONResponse({"code": code}, status_code=201)
 
