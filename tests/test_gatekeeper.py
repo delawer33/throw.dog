@@ -114,6 +114,36 @@ def test_below_the_global_threshold_leaves_innocent_ips_alone():
     assert gate.allow("192.168.0.1") is True
 
 
+def test_idle_ip_buckets_are_reclaimed_once_their_windows_drain():
+    # A spray botnet: many distinct IPs, one guess each, none ever returning.
+    # Their buckets must not pile up in memory forever.
+    clock = FakeClock()
+    gate = Gatekeeper(window_seconds=60, max_tracked_ips=2, clock=clock)
+    for n in range(50):
+        miss(gate, f"10.0.0.{n}")
+    assert len(gate._ip_misses) > gate._max_tracked_ips
+
+    # Every window drains, then a single further operation sweeps the map.
+    clock.advance(61)
+    assert gate.allow("192.168.0.1") is True
+    assert len(gate._ip_misses) == 0
+
+
+def test_active_ip_buckets_survive_a_sweep():
+    # The sweep must reclaim only fully-drained buckets, never an IP still
+    # inside its window.
+    clock = FakeClock()
+    gate = Gatekeeper(window_seconds=60, max_tracked_ips=2, clock=clock)
+    miss(gate, "1.2.3.4")  # goes stale before the sweep
+    clock.advance(61)
+    for n in range(50):  # a fresh spray that triggers the sweep
+        miss(gate, f"10.0.0.{n}")
+
+    assert "1.2.3.4" not in gate._ip_misses  # drained and reclaimed
+    # ...but every IP still inside its window is left untouched.
+    assert all(f"10.0.0.{n}" in gate._ip_misses for n in range(50))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -121,6 +151,7 @@ def test_below_the_global_threshold_leaves_innocent_ips_alone():
         {"miss_budget": 0},
         {"global_window_seconds": 0},
         {"global_miss_threshold": 0},
+        {"max_tracked_ips": 0},
     ],
 )
 def test_nonsense_configuration_is_refused(kwargs):

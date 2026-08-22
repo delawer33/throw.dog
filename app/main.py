@@ -25,6 +25,7 @@ from app.codewords import normalize
 from app.gatekeeper import (
     DEFAULT_GLOBAL_MISS_THRESHOLD,
     DEFAULT_GLOBAL_WINDOW_SECONDS,
+    DEFAULT_MAX_TRACKED_IPS,
     DEFAULT_MISS_BUDGET,
     DEFAULT_WINDOW_SECONDS,
     Gatekeeper,
@@ -37,6 +38,10 @@ DEFAULT_TTL_SECONDS = 600
 DEFAULT_MAX_BYTES = 65536
 DEFAULT_MISS_DELAY_MS = 1000
 DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0
+
+#: Default header carrying the real client IP when we sit behind a trusted
+#: proxy. Cloudflare's ``CF-Connecting-IP`` is always consulted first.
+DEFAULT_FORWARDED_HEADER = "X-Forwarded-For"
 
 #: How much raw body we tolerate around a max-size text. JSON escaping can
 #: inflate the payload well past the text it carries, so the body ceiling is
@@ -59,6 +64,12 @@ class Settings:
     gate_miss_budget: int = DEFAULT_MISS_BUDGET
     gate_global_window_seconds: float = DEFAULT_GLOBAL_WINDOW_SECONDS
     gate_global_miss_threshold: int = DEFAULT_GLOBAL_MISS_THRESHOLD
+    gate_max_tracked_ips: int = DEFAULT_MAX_TRACKED_IPS
+    #: Only trust a forwarding header when we know a proxy sets it. Left False,
+    #: the limiter uses the socket peer — trusting the header on a directly
+    #: exposed app would let anyone spoof their IP and dodge the per-IP budget.
+    trusted_proxy: bool = False
+    forwarded_header: str = DEFAULT_FORWARDED_HEADER
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -80,7 +91,43 @@ class Settings:
             gate_global_miss_threshold=int(
                 source.get("THROW_GATE_GLOBAL_MISS_THRESHOLD", DEFAULT_GLOBAL_MISS_THRESHOLD)
             ),
+            gate_max_tracked_ips=int(
+                source.get("THROW_GATE_MAX_TRACKED_IPS", DEFAULT_MAX_TRACKED_IPS)
+            ),
+            trusted_proxy=_env_bool(source.get("THROW_TRUSTED_PROXY"), default=False),
+            forwarded_header=source.get("THROW_FORWARDED_HEADER", DEFAULT_FORWARDED_HEADER),
         )
+
+
+def _env_bool(value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def client_ip(request: Request, settings: Settings) -> str:
+    """The IP the per-IP budget is charged to.
+
+    Behind Caddy/Cloudflare the socket peer is always the proxy, so the real
+    client must come from a forwarding header — but only when we *know* a proxy
+    sets it (``trusted_proxy``). On a directly exposed app the header is
+    attacker-controlled, so we ignore it and charge the socket peer.
+
+    When trusted, Cloudflare's ``CF-Connecting-IP`` (a single, proxy-set
+    address) wins. Otherwise we take the *leftmost* entry of the forwarded
+    header — the original client as recorded by our own proxy, which we trust
+    to have written it honestly.
+    """
+    if settings.trusted_proxy:
+        cf = request.headers.get("CF-Connecting-IP")
+        if cf and cf.strip():
+            return cf.strip()
+        forwarded = request.headers.get(settings.forwarded_header)
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first
+    return request.client.host if request.client else "unknown"
 
 
 def log_event(event: str, code: str) -> None:
@@ -104,6 +151,7 @@ def create_app(
         miss_budget=config.gate_miss_budget,
         global_window_seconds=config.gate_global_window_seconds,
         global_miss_threshold=config.gate_global_miss_threshold,
+        max_tracked_ips=config.gate_max_tracked_ips,
     )
     miss_delay_seconds = config.miss_delay_ms / 1000.0
     max_body_bytes = config.max_bytes * _BODY_SLACK_FACTOR + _BODY_SLACK_BYTES
@@ -205,19 +253,19 @@ def create_app(
         # The gate decides before the store is ever touched. A tarpitted read
         # returns the ordinary slow miss — byte-identical — so an attacker over
         # budget learns nothing about whether the code existed.
-        client_ip = request.client.host if request.client else "unknown"
-        if not gate.allow(client_ip):
+        ip = client_ip(request, config)
+        if not gate.allow(ip):
             return await miss()
 
         canonical = normalize(code)
         if canonical is None:
-            gate.record(client_ip, ReadOutcome.MISS)
+            gate.record(ip, ReadOutcome.MISS)
             return await miss()
         text = throws.take(canonical)
         if text is None:
-            gate.record(client_ip, ReadOutcome.MISS)
+            gate.record(ip, ReadOutcome.MISS)
             return await miss()
-        gate.record(client_ip, ReadOutcome.HIT)
+        gate.record(ip, ReadOutcome.HIT)
         log_event("read", canonical)
         return JSONResponse({"text": text})
 
