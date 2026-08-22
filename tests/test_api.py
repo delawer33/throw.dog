@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.gatekeeper import Gatekeeper
-from app.main import Settings, create_app
+from app.main import Settings, code_pseudonym, create_app, sanitize_log_path
 
 # Zero delay on misses: the production one-second pause is an anti-guessing
 # measure, not behaviour worth waiting for in tests.
@@ -136,10 +136,142 @@ def test_events_are_logged_without_the_throw_content(client, capsys):
     client.post(f"/api/throws/{code}")
 
     out = capsys.readouterr().out
-    assert f"event=created code={code}" in out
-    assert f"event=read code={code}" in out
+    pseudonym = code_pseudonym(code)
+    # The pair is still correlatable: created and read carry the same pseudonym.
+    assert f"event=created code={pseudonym}" in out
+    assert f"event=read code={pseudonym}" in out
     assert "ts=" in out
     assert "top secret payload" not in out
+
+
+def test_the_raw_code_never_reaches_the_event_log(client, capsys):
+    code = throw(client, "another secret")
+    client.post(f"/api/throws/{code}")
+
+    out = capsys.readouterr().out
+    # The shared secret must never appear verbatim; only its hash prefix does.
+    assert code not in out
+    assert code_pseudonym(code) in out
+
+
+def test_the_pseudonym_is_a_short_stable_hash_prefix():
+    # Deterministic and short: same code -> same pseudonym, within a process.
+    once = code_pseudonym("red-fox")
+    again = code_pseudonym("red-fox")
+    assert once == again
+    assert once != code_pseudonym("blue-jay")
+    assert len(once) == 12
+    assert "red-fox" not in once
+
+
+def test_the_pseudonym_is_keyed_so_it_cannot_be_precomputed_from_logs():
+    # The code space is tiny (~1.09M), so a *plain* SHA-256 prefix is reversible
+    # from the logs alone. The pseudonym must be keyed: the same code under two
+    # different secrets yields two different pseudonyms.
+    import hashlib
+
+    under_one = code_pseudonym("red-fox", secret=b"secret-one")
+    under_two = code_pseudonym("red-fox", secret=b"secret-two")
+    assert under_one != under_two
+
+    # Stable under a fixed key — an operator who pins the secret gets stable
+    # cross-restart correlation.
+    assert code_pseudonym("red-fox", secret=b"secret-one") == under_one
+
+    # And it is genuinely keyed, not the old unsalted hash prefix an attacker
+    # could tabulate offline.
+    assert under_one != hashlib.sha256(b"red-fox").hexdigest()[:12]
+
+
+def test_a_fixed_env_secret_flows_through_create_app_to_the_event_log(capsys):
+    # THROW_LOG_HMAC_SECRET pins the key; the logged pseudonym must be the one
+    # produced under that key (proving create_app wires the secret through).
+    settings = Settings.from_env({"THROW_LOG_HMAC_SECRET": "operator-pinned", "THROW_MISS_DELAY_MS": "0"})
+    with TestClient(create_app(settings)) as c:
+        code = throw(c, "keyed by env")
+        c.post(f"/api/throws/{code}")
+    out = capsys.readouterr().out
+    expected = code_pseudonym(code, secret=b"operator-pinned")
+    assert f"event=created code={expected}" in out
+    assert f"event=read code={expected}" in out
+
+
+def test_the_access_log_path_is_pseudonymised_for_a_receiver_request():
+    # uvicorn logs the request line verbatim; a receiver GET is `/{code}` and a
+    # read POST is `/api/throws/{code}`. Neither may leak the code.
+    receiver = sanitize_log_path("/red-fox")
+    assert "red-fox" not in receiver
+    assert receiver == "/" + code_pseudonym("red-fox")
+
+    read = sanitize_log_path("/api/throws/red-fox?x=1")
+    assert "red-fox" not in read
+    assert read == "/api/throws/" + code_pseudonym("red-fox")
+
+    # Code-free routes are logged untouched.
+    for safe in ("/", "/healthz", "/robots.txt", "/api/throws"):
+        assert sanitize_log_path(safe) == safe
+
+
+def test_a_noncanonical_alias_pseudonymises_like_its_canonical_read():
+    # The read path logs the *normalised* code, so the access-log path must
+    # normalise before hashing too — otherwise `/api/throws/RED_FOX` would carry
+    # a different pseudonym than its `event=read` line and the two streams could
+    # not be correlated. The raw code still never appears either way.
+    canonical = code_pseudonym("red-fox")
+
+    read = sanitize_log_path("/api/throws/RED_FOX")
+    assert "RED_FOX" not in read and "red-fox" not in read
+    assert read == "/api/throws/" + canonical
+
+    receiver = sanitize_log_path("/RED_FOX")
+    assert "RED_FOX" not in receiver and "red-fox" not in receiver
+    assert receiver == "/" + canonical
+
+
+def test_an_aliased_read_correlates_with_its_create_across_the_two_log_streams(client, capsys):
+    code = throw(client, "correlate me")
+    adjective, noun = code.split("-")
+    # Read via a non-canonical alias (uppercase + underscore).
+    alias = f"{adjective.upper()}_{noun.upper()}"
+    assert client.post(f"/api/throws/{alias}").status_code == 200
+
+    out = capsys.readouterr().out
+    pseudonym = code_pseudonym(code)
+    # Event log: created and read of the same throw share one pseudonym...
+    assert f"event=created code={pseudonym}" in out
+    assert f"event=read code={pseudonym}" in out
+    # ...and the access-log path for the aliased read agrees with it.
+    assert sanitize_log_path(f"/api/throws/{alias}") == "/api/throws/" + pseudonym
+
+
+def test_the_access_log_filter_redacts_the_code_in_the_request_line():
+    # Exercise the real filter on a record shaped exactly as uvicorn builds it.
+    import logging
+
+    from app.main import _AccessLogRedactor
+
+    record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("1.2.3.4:5", "GET", "/red-fox", "1.1", 405),
+        exc_info=None,
+    )
+    assert _AccessLogRedactor().filter(record) is True
+    rendered = record.getMessage()
+    assert "red-fox" not in rendered
+    assert code_pseudonym("red-fox") in rendered
+
+
+def test_the_redactor_is_installed_on_the_uvicorn_access_logger():
+    import logging
+
+    from app.main import _AccessLogRedactor
+
+    access_logger = logging.getLogger("uvicorn.access")
+    assert any(isinstance(f, _AccessLogRedactor) for f in access_logger.filters)
 
 
 def test_default_settings_work_without_env(monkeypatch):

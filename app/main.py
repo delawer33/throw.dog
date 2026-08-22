@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
+import logging
 import os
+import secrets
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -53,6 +56,18 @@ _BODY_SLACK_BYTES = 1024
 #: Telling them apart would turn code-guessing into a search with feedback.
 MISS_BODY = {"detail": "no such throw"}
 
+#: Per-process random key for the log pseudonym HMAC, generated fresh on every
+#: start. It is the *default* keying: with it, a plain SHA-256 prefix table is
+#: useless to an attacker who only has the logs (the code space is a tiny ~1.09M
+#: values, trivially precomputed against an unkeyed hash), because they never
+#: see this key — it lives only in RAM and is never logged. The tradeoff of the
+#: random default is that pseudonyms differ across restarts, so you cannot
+#: correlate a throw's events across a process boundary. An operator who *wants*
+#: that stable cross-restart correlation sets ``THROW_LOG_HMAC_SECRET`` to a
+#: fixed value — but must then keep that secret off the logs and out of the
+#: image, since anyone who learns it regains the precompute attack.
+_DEFAULT_LOG_HMAC_SECRET = secrets.token_bytes(32)
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -70,10 +85,15 @@ class Settings:
     #: exposed app would let anyone spoof their IP and dodge the per-IP budget.
     trusted_proxy: bool = False
     forwarded_header: str = DEFAULT_FORWARDED_HEADER
+    #: Key for the log-pseudonym HMAC. Defaults to a per-process random value
+    #: (see ``_DEFAULT_LOG_HMAC_SECRET``); set ``THROW_LOG_HMAC_SECRET`` to pin
+    #: it for stable cross-restart correlation.
+    log_hmac_secret: bytes = _DEFAULT_LOG_HMAC_SECRET
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
         source = os.environ if env is None else env
+        secret = source.get("THROW_LOG_HMAC_SECRET")
         return cls(
             ttl_seconds=float(source.get("THROW_TTL_SECONDS", DEFAULT_TTL_SECONDS)),
             max_bytes=int(source.get("THROW_MAX_BYTES", DEFAULT_MAX_BYTES)),
@@ -96,6 +116,9 @@ class Settings:
             ),
             trusted_proxy=_env_bool(source.get("THROW_TRUSTED_PROXY"), default=False),
             forwarded_header=source.get("THROW_FORWARDED_HEADER", DEFAULT_FORWARDED_HEADER),
+            log_hmac_secret=(
+                secret.encode("utf-8") if secret else _DEFAULT_LOG_HMAC_SECRET
+            ),
         )
 
 
@@ -130,13 +153,117 @@ def client_ip(request: Request, settings: Settings) -> str:
     return request.client.host if request.client else "unknown"
 
 
+#: How many hex chars of the keyed HMAC to keep as a code's log pseudonym.
+#: 12 hex = 48 bits — collision-safe for any realistic log volume, yet short
+#: enough to eyeball. Once the digest is *keyed*, 12 hex is plenty: the point is
+#: no longer "can't brute-force the prefix" but "can't invert without the key".
+#: Stable within a process: the same code maps to the same pseudonym, so the
+#: created/read pair of one throw stays correlatable across log lines.
+_CODE_PSEUDONYM_LEN = 12
+
+#: The key code_pseudonym uses when no explicit secret is passed. Starts at the
+#: per-process random default and is overwritten by ``create_app`` with the
+#: active ``Settings.log_hmac_secret`` — this is what lets the uvicorn access-log
+#: filter (which sees no Settings) key its pseudonyms the same way log_event does.
+_active_log_hmac_secret = _DEFAULT_LOG_HMAC_SECRET
+
+#: Paths uvicorn may log verbatim: they carry no throw code. Everything else
+#: is a receiver code (``/red-fox``) or a read (``/api/throws/red-fox``) and
+#: must be pseudonymised before it reaches the access log.
+_SAFE_LOG_PATHS = frozenset({"/", "/healthz", "/robots.txt", "/api/throws"})
+
+
+def code_pseudonym(code: str, secret: bytes | None = None) -> str:
+    """A short, keyed, one-way stand-in for a throw code.
+
+    The raw code is a shared secret between the two humans of a throw; it must
+    never land in a log we keep. But the code space is tiny (~1.09M values), so a
+    *plain* SHA-256 prefix is reversible by anyone with the logs: precompute the
+    pseudonym→code table once, look up any live throw's code, steal its secret.
+
+    We defeat that by keying the digest with HMAC-SHA256 under a secret the
+    attacker never sees (``secret``, defaulting to the active per-process key).
+    Without the key the pseudonym cannot be inverted from log access alone. The
+    keyed prefix is still stable — same code, same key → same pseudonym — so
+    created/read events of one throw still pair up.
+    """
+    key = _active_log_hmac_secret if secret is None else secret
+    digest = hmac.new(key, code.encode("utf-8"), "sha256").hexdigest()
+    return digest[:_CODE_PSEUDONYM_LEN]
+
+
 def log_event(event: str, code: str) -> None:
     """One machine-readable line per interesting moment, on stdout.
 
-    Throw content never appears here — not in events, not in errors.
+    Throw content never appears here — nor does the raw code: only its stable
+    pseudonym, so created and read of the same throw still line up.
     """
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-    print(f"event={event} code={code} ts={timestamp}", file=sys.stdout, flush=True)
+    print(
+        f"event={event} code={code_pseudonym(code)} ts={timestamp}",
+        file=sys.stdout,
+        flush=True,
+    )
+
+
+def sanitize_log_path(raw_path: str) -> str:
+    """Strip any throw code out of a request path before it is logged.
+
+    uvicorn's access log writes the request line verbatim, and for a receiver
+    GET (``/{code}``) or a read POST (``/api/throws/{code}``) that path *is*
+    the code. We replace the code segment with its pseudonym so the access log
+    stays useful (routes, status codes) without ever recording the secret.
+
+    The read path pseudonymises the *normalised* code (``red-fox``), so we must
+    normalise the raw segment here too before hashing — otherwise a non-canonical
+    alias (``/api/throws/RED_FOX``) would pseudonymise to a different value than
+    its ``event=read`` line and the two streams would fail to correlate. When the
+    segment does not normalise to a real code we fall back to hashing it raw:
+    still never the plaintext, just an uncorrelatable stand-in for a probe.
+    """
+    path = raw_path.split("?", 1)[0]
+    if path in _SAFE_LOG_PATHS:
+        return path
+    if path.startswith("/api/throws/"):
+        code = path[len("/api/throws/") :]
+        return "/api/throws/" + code_pseudonym(normalize(code) or code)
+    # Anything else is a bare receiver code (or an unknown probe): redact the
+    # whole thing rather than risk leaking a code we failed to anticipate.
+    segment = path.lstrip("/")
+    return "/" + code_pseudonym(normalize(segment) or segment)
+
+
+class _AccessLogRedactor(logging.Filter):
+    """Rewrites the path in every uvicorn access-log record.
+
+    uvicorn builds each access record with ``record.args`` set to
+    ``(client_addr, method, full_path, http_version, status_code)``; the path
+    sits at index 2. We pseudonymise it in place so no formatter — default or
+    custom — can ever emit the raw code. A filter (not a disabled logger) keeps
+    the operationally useful access log alive, just code-free.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            redacted = list(args)
+            redacted[2] = sanitize_log_path(args[2])
+            record.args = tuple(redacted)
+        return True
+
+
+def _install_access_log_redactor() -> None:
+    """Attach the path redactor to uvicorn's access logger, exactly once.
+
+    Called at import time so it is in place however ``app.main:app`` is served
+    (the container just runs ``uvicorn app.main:app`` with no logging config).
+    """
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessLogRedactor) for f in access_logger.filters):
+        access_logger.addFilter(_AccessLogRedactor())
+
+
+_install_access_log_redactor()
 
 
 def create_app(
@@ -145,6 +272,10 @@ def create_app(
     gatekeeper: Gatekeeper | None = None,
 ) -> FastAPI:
     config = settings or Settings.from_env()
+    # Point the module-level pseudonym key (used by log_event and, crucially, the
+    # uvicorn access-log filter, which never sees Settings) at this app's key.
+    global _active_log_hmac_secret
+    _active_log_hmac_secret = config.log_hmac_secret
     throws = store or ThrowStore(ttl_seconds=config.ttl_seconds)
     gate = gatekeeper or Gatekeeper(
         window_seconds=config.gate_window_seconds,
