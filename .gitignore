@@ -1,0 +1,21 @@
+# Секреты и сертификаты — никогда в git
+.env
+certs/
+*.pem
+*.key
+
+# Окружение
+.venv/
+venv/
+
+# Питон
+__pycache__/
+*.pyc
+
+# Кэши инструментов
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Мусор ОС
+.DS_Store
