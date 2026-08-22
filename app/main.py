@@ -20,6 +20,7 @@ import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -41,6 +42,19 @@ DEFAULT_TTL_SECONDS = 600
 DEFAULT_MAX_BYTES = 65536
 DEFAULT_MISS_DELAY_MS = 1000
 DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0
+
+#: Where Pro fake-door email captures are appended. Defaults to a file on the
+#: docker-volume-mounted ``/data`` dir so the list survives container restarts;
+#: override with ``THROW_PRO_EMAILS_PATH`` (tests point it at a tmp file).
+DEFAULT_PRO_EMAILS_PATH = "/data/pro-emails.txt"
+
+#: The most we will accept for a Pro-interest email. RFC 5321 caps an address at
+#: 254 chars; anything longer is junk and never touches the file.
+_MAX_EMAIL_LEN = 254
+
+#: A Pro-interest request body is tiny — a single email in a JSON object. Cap the
+#: bytes we read so the endpoint can't be used to buffer a flood.
+_PRO_BODY_MAX_BYTES = 4096
 
 #: Default header carrying the real client IP when we sit behind a trusted
 #: proxy. Cloudflare's ``CF-Connecting-IP`` is always consulted first.
@@ -85,6 +99,8 @@ class Settings:
     #: exposed app would let anyone spoof their IP and dodge the per-IP budget.
     trusted_proxy: bool = False
     forwarded_header: str = DEFAULT_FORWARDED_HEADER
+    #: File the Pro fake-door appends interested emails to (one per line).
+    pro_emails_path: str = DEFAULT_PRO_EMAILS_PATH
     #: Key for the log-pseudonym HMAC. Defaults to a per-process random value
     #: (see ``_DEFAULT_LOG_HMAC_SECRET``); set ``THROW_LOG_HMAC_SECRET`` to pin
     #: it for stable cross-restart correlation.
@@ -116,10 +132,47 @@ class Settings:
             ),
             trusted_proxy=_env_bool(source.get("THROW_TRUSTED_PROXY"), default=False),
             forwarded_header=source.get("THROW_FORWARDED_HEADER", DEFAULT_FORWARDED_HEADER),
+            pro_emails_path=source.get("THROW_PRO_EMAILS_PATH", DEFAULT_PRO_EMAILS_PATH),
             log_hmac_secret=(
                 secret.encode("utf-8") if secret else _DEFAULT_LOG_HMAC_SECRET
             ),
         )
+
+
+def normalize_pro_email(raw: object) -> str | None:
+    """Minimal validation for a Pro fake-door email; returns it trimmed or None.
+
+    This is a fake-door signup, not an auth flow — we only need enough to reject
+    obvious junk before appending. The rule: a string with a single-line ``@``
+    that has something on both sides, no whitespace, and within the RFC length
+    cap. We deliberately do not verify deliverability.
+    """
+    if not isinstance(raw, str):
+        return None
+    email = raw.strip()
+    if not email or len(email) > _MAX_EMAIL_LEN:
+        return None
+    if any(c.isspace() for c in email):
+        return None
+    local, sep, domain = email.partition("@")
+    if not sep or not local or not domain or "@" in domain:
+        return None
+    return email
+
+
+def append_pro_email(path: str, email: str) -> None:
+    """Append one interested email to ``path``, creating the dir if needed.
+
+    One record per line: an ISO timestamp and the email, tab-separated. The file
+    lives on a docker-volume so the list survives restarts. The email is written
+    here and nowhere else — never to stdout or the access log — so it stays out
+    of anything we ship or keep as operational logs.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(f"{ts}\t{email}\n")
 
 
 def _env_bool(value: str | None, *, default: bool) -> bool:
@@ -170,7 +223,9 @@ _active_log_hmac_secret = _DEFAULT_LOG_HMAC_SECRET
 #: Paths uvicorn may log verbatim: they carry no throw code. Everything else
 #: is a receiver code (``/red-fox``) or a read (``/api/throws/red-fox``) and
 #: must be pseudonymised before it reaches the access log.
-_SAFE_LOG_PATHS = frozenset({"/", "/healthz", "/robots.txt", "/api/throws"})
+_SAFE_LOG_PATHS = frozenset(
+    {"/", "/healthz", "/robots.txt", "/api/throws", "/api/pro-interest"}
+)
 
 
 def code_pseudonym(code: str, secret: bytes | None = None) -> str:
@@ -399,6 +454,34 @@ def create_app(
         gate.record(ip, ReadOutcome.HIT)
         log_event("read", canonical)
         return JSONResponse({"text": text})
+
+    @app.post("/api/pro-interest")
+    async def pro_interest(request: Request) -> JSONResponse:
+        # The email arrives in a POST body — never the URL — so it never reaches
+        # the access log. We also never print it: it is user data, appended only
+        # to the volume-backed file.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > _PRO_BODY_MAX_BYTES:
+                return JSONResponse({"detail": "request too large"}, status_code=413)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return JSONResponse({"detail": "malformed request"}, status_code=400)
+        email = normalize_pro_email(
+            payload.get("email") if isinstance(payload, dict) else None
+        )
+        if email is None:
+            return JSONResponse({"detail": "invalid email"}, status_code=400)
+        try:
+            append_pro_email(config.pro_emails_path, email)
+        except OSError:
+            return JSONResponse(
+                {"detail": "could not record interest, try again"}, status_code=503
+            )
+        log_event("pro_email", "-")
+        return JSONResponse({"ok": True}, status_code=201)
 
     @app.get("/", response_class=HTMLResponse)
     async def get_sender_page(request: Request) -> HTMLResponse:

@@ -13,6 +13,10 @@ services:
     # Порт не публикуется на хост: снаружи ходит только Caddy.
     expose:
       - "${APP_PORT:-8000}"
+    # Fake-door Pro: собранные имейлы дописываются в файл на этом volume,
+    # чтобы список пережил перезапуск. Путь задаётся THROW_PRO_EMAILS_PATH.
+    volumes:
+      - pro_data:/data
     networks:
       - throwdog_net
     # В slim-образе нет curl/wget — проверяем /healthz однострочником на python.
@@ -59,3 +63,4 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  pro_data:
