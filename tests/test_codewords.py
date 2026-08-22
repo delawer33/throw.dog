@@ -31,6 +31,12 @@ def test_vocabulary_has_enough_entropy():
     assert codewords.COMBINATIONS >= 10_000
 
 
+def test_code_space_is_at_least_a_million():
+    """Slice 1 target: the vocabulary must span >= 1e6 distinct codes."""
+    assert len(codewords.ADJECTIVES) * len(codewords.NOUNS) >= 1_000_000
+    assert codewords.COMBINATIONS >= 1_000_000
+
+
 def test_generator_spreads_across_the_vocabulary():
     codes = {codewords.generate() for _ in range(500)}
     assert len(codes) > 450, "500 draws should almost never collide"
