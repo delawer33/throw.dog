@@ -15,6 +15,7 @@ must never burn a one-shot throw.
 from __future__ import annotations
 
 import json
+import os
 from typing import Final
 
 # Sticker-punk palette and building blocks. No `%` in the template that wraps
@@ -167,6 +168,36 @@ _BONE: Final = """<svg class="bone" width="48" height="21" viewBox="0 0 46 20" a
   <path d="M8 4a5 5 0 0 1 5 5h20a5 5 0 1 1 8-4 5 5 0 1 1-4 8H17a5 5 0 1 1-8-4 5 5 0 0 1-1-5z"
     fill="#fff" stroke="#181207" stroke-width="3"/></svg>"""
 
+# --- Analytics (self-hosted Umami, cookieless) ------------------------------
+#
+# The one deliberate exception to "everything is inline": a single <script src>
+# to our OWN analytics subdomain (never a third-party CDN). Umami is cookieless
+# by default — it sets no cookie and needs no consent banner, which is the whole
+# reason it was chosen over Google Analytics (see model/10-metrics.md). Both the
+# host and the website id come from the environment so the operator can point the
+# page at the running instance without touching code; an empty ANALYTICS_HOST
+# disables analytics entirely (the snippet collapses to nothing). Defaults are
+# safe placeholders so the module-level pages still render in tests/dev.
+ANALYTICS_HOST: Final = os.environ.get("ANALYTICS_HOST", "analytics.throw.dog").strip()
+ANALYTICS_WEBSITE_ID: Final = os.environ.get(
+    "ANALYTICS_WEBSITE_ID", "00000000-0000-0000-0000-000000000000"
+).strip()
+
+# The funnel events fired via umami.track (model/10-metrics.md): page_view is
+# automatic (the tracker fires it on load); the rest are wired to UI actions.
+_ANALYTICS_SNIPPET: Final = (
+    (
+        '<script defer src="https://%s/script.js" data-website-id="%s"></script>\n'
+        # tdTrack is a safe no-op when the tracker is blocked or still loading,
+        # so the funnel calls below never throw.
+        "<script>function tdTrack(n){try{if(window.umami&&window.umami.track)"
+        "window.umami.track(n);}catch(e){}}</script>\n"
+    )
+    % (ANALYTICS_HOST, ANALYTICS_WEBSITE_ID)
+    if ANALYTICS_HOST
+    else "<script>function tdTrack(n){}</script>\n"
+)
+
 _HEAD: Final = """<!doctype html>
 <html lang="@@lang@@">
 <head>
@@ -175,8 +206,8 @@ _HEAD: Final = """<!doctype html>
 <meta name="robots" content="noindex, nofollow">
 <title>throw.dog</title>
 <style>%s</style>
-</head>
-""" % _STYLE
+%s</head>
+""" % (_STYLE, _ANALYTICS_SNIPPET)
 
 # Minimal QR generator (byte mode, EC level L, versions 1-4, best mask). Output
 # is verified module-for-module against the reference `qrcode` encoder. Only the
@@ -333,6 +364,7 @@ var T = @@__T__@@;
       if (!response.ok) { throw new Error(T.throwFailed); }
       return response.json();
     }).then(function (data) {
+      tdTrack('code_created');
       currentUrl = window.location.origin + '/' + data.code;
       codebig.textContent = data.code;
       urlEl.textContent = currentUrl.replace(/^https?:\\/\\//, '');
@@ -352,6 +384,7 @@ var T = @@__T__@@;
     if (!clipboard) { return; }
     var pasted = clipboard.getData('text');
     if (!pasted || !pasted.trim()) { return; }
+    tdTrack('paste');
     event.preventDefault();
     text.value = pasted;
     send(pasted);
@@ -377,6 +410,13 @@ var T = @@__T__@@;
     stage.classList.remove('thrown');
     text.focus();
   });
+
+  // Pro fake-door funnel hooks. The Pro UI lives in another slice, so these are
+  // guarded: they attach only when the elements exist and are no-ops otherwise.
+  var proClick = document.getElementById('pro-click');
+  if (proClick) { proClick.addEventListener('click', function () { tdTrack('pro_click'); }); }
+  var proEmail = document.getElementById('pro-email');
+  if (proEmail) { proEmail.addEventListener('submit', function () { tdTrack('pro_email'); }); }
 })();
 </script>
 </body>
@@ -417,6 +457,7 @@ var T = @@__T__@@;
       return response.json();
     })
     .then(function (data) {
+      tdTrack('received');
       target.textContent = data.text;
       status.hidden = true;
       result.hidden = false;
