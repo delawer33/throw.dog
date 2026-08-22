@@ -136,6 +136,30 @@ _STYLE: Final = """
   }
   [hidden] { display: none !important; }
 
+  /* footer on the main pages — links to the EN-only legal pages */
+  .foot {
+    margin-top: 34px; font-weight: 700; font-size: 13px; display: flex;
+    gap: 10px; align-items: center; flex-wrap: wrap; opacity: .8;
+  }
+  .foot a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+  .foot a:hover { color: var(--red); }
+
+  /* legal (Terms / Privacy) prose, reusing the .card shell */
+  .prose { font-weight: 600; font-size: 15px; }
+  .prose h2 {
+    font-size: 18px; font-weight: 900; text-transform: uppercase;
+    letter-spacing: -.3px; margin: 20px 0 8px;
+  }
+  .prose h2:first-child { margin-top: 0; }
+  .prose p { margin-bottom: 12px; }
+  .prose p:last-child { margin-bottom: 0; }
+  .prose a { color: var(--ink); font-weight: 800; }
+  .abuse {
+    display: inline-block; font-weight: 800; background: var(--mustard);
+    border: 2px solid var(--ink); border-radius: 8px; padding: 1px 8px;
+    text-decoration: none; transform: rotate(-1deg);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .bone, .dog, .stage.thrown #done, .btn { animation: none !important; transition: none !important; }
     .stage.thrown .bone { opacity: 0; }
@@ -288,6 +312,12 @@ _SENDER_TMPL: Final = _HEAD + """<body>
   </div>
 
   <span class="chip">@@chip@@</span>
+
+  <footer class="foot">
+    <a href="/terms">@@footerTerms@@</a>
+    <span aria-hidden="true">·</span>
+    <a href="/privacy">@@footerPrivacy@@</a>
+  </footer>
 </div>
 
 <script>
@@ -400,6 +430,12 @@ _RECEIVER_TMPL: Final = _HEAD + """<body>
   </div>
 
   <span class="chip">@@chip@@</span>
+
+  <footer class="foot">
+    <a href="/terms">@@footerTerms@@</a>
+    <span aria-hidden="true">·</span>
+    <a href="/privacy">@@footerPrivacy@@</a>
+  </footer>
 </div>
 
 <script>
@@ -482,6 +518,10 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "wrong": "Something went wrong. Refresh the page.",
         "netRecv": "Network problem. Refresh the page.",
         "selectFallback": "press Ctrl+C / long-press to copy",
+        # Footer link labels appear on the main pages, so they ARE localised.
+        # The pages they point to (/terms, /privacy) are EN-only (launch audience).
+        "footerTerms": "Terms",
+        "footerPrivacy": "Privacy",
     },
     "ru": {
         "taglineA": "Кинь.",
@@ -505,6 +545,8 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "wrong": "Что-то пошло не так. Обнови страницу.",
         "netRecv": "Проблема сети. Обнови страницу.",
         "selectFallback": "нажми Ctrl+C / удерживай, чтобы скопировать",
+        "footerTerms": "Условия",
+        "footerPrivacy": "Приватность",
     },
 }
 
@@ -577,3 +619,113 @@ SENDER_PAGE: Final = render_sender(DEFAULT_LOCALE)
 RECEIVER_PAGE: Final = render_receiver(DEFAULT_LOCALE)
 
 ROBOTS_TXT: Final = "User-agent: *\nDisallow: /\n"
+
+
+# --- legal pages (Terms / Privacy) ------------------------------------------
+#
+# These two are deliberately English-only: the launch audience is EN, and RU
+# versions of the legal copy are explicitly out of scope for now. So — unlike
+# every other user-facing string — the body copy here does NOT go through the
+# ``STRINGS`` i18n dict; it is hardcoded static English text. Only the footer
+# *link labels* on the main pages are localised (``footerTerms``/``footerPrivacy``
+# in ``STRINGS``); the destination pages themselves stay EN.
+#
+# They reuse the same sticker-punk shell (``_HEAD`` + ``_STYLE``) and the same
+# ``noindex`` handling (the ``<meta robots>`` in ``_HEAD`` plus main.py's
+# ``X-Robots-Tag`` middleware), so they cost no extra CSS and stay well under
+# the 100 KB budget.
+#
+# The copy is intentionally short and truthful, matching the product's
+# privacy-first model: ephemeral, one-time read, ~10 min TTL, RAM only, no
+# accounts, no tracking cookies, content never logged, codes pseudonymized in
+# logs. No boilerplate we can't stand behind.
+#
+# NOTE (HITL / founder step): the abuse@ mailbox below is only a UI address.
+# Making abuse@throw.dog actually deliver mail is a manual one-time founder step
+# in Cloudflare (Email Routing → route abuse@throw.dog to a real inbox). Nothing
+# in this codebase provisions it.
+
+_ABUSE_EMAIL: Final = "abuse@throw.dog"
+
+
+def _legal_page(h1_html: str, body_html: str) -> str:
+    """Wrap static EN legal copy in the shared sticker-punk shell.
+
+    ``_HEAD`` still carries the ``@@lang@@`` token (it is shared with the
+    localised templates); legal pages are English, so we fill it with ``en``.
+    """
+    head = _HEAD.replace("@@lang@@", DEFAULT_LOCALE)
+    return head + f"""<body>
+<div class="wrap">
+  <div class="top">{_PAW}<b>throw.dog</b></div>
+
+  <h1>{h1_html}</h1>
+
+  <div class="card prose">
+{body_html}
+  </div>
+
+  <footer class="foot">
+    <a href="/">home</a>
+    <span aria-hidden="true">·</span>
+    <a href="/terms">Terms</a>
+    <span aria-hidden="true">·</span>
+    <a href="/privacy">Privacy</a>
+  </footer>
+</div>
+</body>
+</html>
+"""
+
+
+_TERMS_BODY: Final = f"""    <h2>What this is</h2>
+    <p>throw.dog moves a piece of text from one device to another. Paste text,
+    get a short code and a QR, then open it on the other device. That is the
+    whole service — no accounts, no sign-up.</p>
+
+    <h2>One throw, one read</h2>
+    <p>Each throw is held for about 10 minutes and is deleted the instant it is
+    read — whichever comes first. Opening the link consumes it: the text is gone
+    and the link stops working. Treat every throw as one-time and temporary, and
+    do not rely on it to store anything.</p>
+
+    <h2>Acceptable use</h2>
+    <p>Do not use throw.dog to send illegal content, malware, or anything you
+    have no right to share, and do not try to break, overload, or abuse the
+    service. It is a pass-through pipe for moving your own text between devices.</p>
+
+    <h2>No warranty</h2>
+    <p>The service is provided as-is, on a best-effort basis, with no guarantee
+    of availability or delivery. A throw can expire, fail, or be lost. Use it
+    accordingly.</p>
+
+    <h2>Abuse</h2>
+    <p>Report abuse to <a class="abuse" href="mailto:{_ABUSE_EMAIL}">{_ABUSE_EMAIL}</a>.</p>"""
+
+
+_PRIVACY_BODY: Final = f"""    <h2>The short version</h2>
+    <p>throw.dog is built to know as little about you as possible: no accounts,
+    no tracking cookies, no profiling analytics, no ads.</p>
+
+    <h2>Your text</h2>
+    <p>The text you throw lives only in the server's memory, for about 10 minutes
+    at most, and is erased the moment it is read. Nothing is written to disk and
+    nothing is kept long-term. The content of a throw is never logged.</p>
+
+    <h2>Logs</h2>
+    <p>We keep minimal operational logs (for example, that a throw was created or
+    read) to run the service and stop abuse. Throw codes are pseudonymized in
+    logs with a keyed hash, so a log on its own cannot be turned back into a
+    working code, and the text is never included.</p>
+
+    <h2>Cookies &amp; tracking</h2>
+    <p>None. throw.dog sets no tracking cookies and loads no third-party scripts
+    or fonts — every page is a single self-contained document.</p>
+
+    <h2>Contact</h2>
+    <p>Questions or abuse reports:
+    <a class="abuse" href="mailto:{_ABUSE_EMAIL}">{_ABUSE_EMAIL}</a>.</p>"""
+
+
+TERMS_PAGE: Final = _legal_page('Terms of <span class="hl">Service</span>', _TERMS_BODY)
+PRIVACY_PAGE: Final = _legal_page('Privacy <span class="hl">Policy</span>', _PRIVACY_BODY)

@@ -5,19 +5,28 @@ Speed is a design rule (``model/08-design.md``): each document must weigh under
 whole.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.pages import (
+    PRIVACY_PAGE,
     RECEIVER_PAGE,
     SENDER_PAGE,
     STRINGS,
+    TERMS_PAGE,
     pick_locale,
     render_receiver,
     render_sender,
 )
 
 PAGE_BUDGET = 100 * 1024
+
+
+@pytest.fixture()
+def client():
+    with TestClient(create_app()) as test_client:
+        yield test_client
 
 
 def test_sender_page_is_under_the_budget():
@@ -28,6 +37,12 @@ def test_sender_page_is_under_the_budget():
 def test_receiver_page_is_under_the_budget():
     size = len(RECEIVER_PAGE.encode("utf-8"))
     assert size < PAGE_BUDGET, f"receiver page is {size} bytes, budget is {PAGE_BUDGET}"
+
+
+def test_legal_pages_are_under_the_budget():
+    for name, page in (("terms", TERMS_PAGE), ("privacy", PRIVACY_PAGE)):
+        size = len(page.encode("utf-8"))
+        assert size < PAGE_BUDGET, f"{name} page is {size} bytes, budget is {PAGE_BUDGET}"
 
 
 def test_pages_make_no_external_requests():
@@ -107,3 +122,63 @@ def test_server_serves_russian_only_when_the_browser_prefers_it():
     # The receiver page is localised the same way.
     recv = client.get("/abc-def", headers={"Accept-Language": "ru"})
     assert STRINGS["ru"]["fetching"] in recv.text
+
+
+# --- legal pages (Terms / Privacy) ------------------------------------------
+
+
+def test_terms_page_serves_and_mentions_ephemerality_and_abuse(client):
+    response = client.get("/terms")
+    assert response.status_code == 200
+    body = response.text
+    assert "Terms of" in body
+    # ephemerality: one-time read + ~10 minute lifetime.
+    assert "10 minutes" in body
+    assert "deleted the instant" in body  # one-time read
+    # visible abuse contact.
+    assert "abuse@throw.dog" in body
+
+
+def test_privacy_page_serves_and_mentions_ephemerality_and_abuse(client):
+    response = client.get("/privacy")
+    assert response.status_code == 200
+    body = response.text
+    assert "Privacy" in body
+    assert "10 minutes" in body
+    assert "never logged" in body
+    assert "abuse@throw.dog" in body
+
+
+def test_legal_pages_carry_noindex(client):
+    # Same noindex handling as every page: meta tag in the shell + response header.
+    for path in ("/terms", "/privacy"):
+        response = client.get(path)
+        assert 'name="robots" content="noindex, nofollow"' in response.text
+        assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+
+
+def test_legal_pages_are_english_only(client):
+    # RU is out of scope for the legal copy: the pages stay English regardless
+    # of Accept-Language, and declare lang="en".
+    for path in ("/terms", "/privacy"):
+        response = client.get(path, headers={"Accept-Language": "ru-RU,ru;q=0.9"})
+        assert '<html lang="en">' in response.text
+        assert "@@" not in response.text  # no unfilled tokens
+
+
+def test_main_pages_footer_links_to_legal_pages(client):
+    # Footer link labels are localised; the destinations are the EN-only pages.
+    en = client.get("/", headers={"Accept-Language": "en-US,en;q=0.9"}).text
+    assert 'href="/terms"' in en
+    assert 'href="/privacy"' in en
+    assert STRINGS["en"]["footerTerms"] in en
+    assert STRINGS["en"]["footerPrivacy"] in en
+
+    ru = client.get("/", headers={"Accept-Language": "ru-RU,ru;q=0.9"}).text
+    assert STRINGS["ru"]["footerTerms"] in ru
+    assert STRINGS["ru"]["footerPrivacy"] in ru
+
+    # The receiver page carries the same footer.
+    recv = client.get("/abc-def")
+    assert 'href="/terms"' in recv.text
+    assert 'href="/privacy"' in recv.text
