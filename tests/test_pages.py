@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.pages import (
+    ANALYTICS_HOST,
+    ANALYTICS_WEBSITE_ID,
     PRIVACY_PAGE,
     RECEIVER_PAGE,
     SENDER_PAGE,
@@ -45,15 +47,53 @@ def test_legal_pages_are_under_the_budget():
         assert size < PAGE_BUDGET, f"{name} page is {size} bytes, budget is {PAGE_BUDGET}"
 
 
-def test_pages_make_no_external_requests():
-    # Everything is inline; nothing reaches out to a CDN, font host, or image.
-    # The SVG xmlns is a namespace identifier, not a fetched URL.
+def test_pages_make_no_external_requests_except_own_analytics():
+    # Everything is inline, with ONE deliberate exception: the cookieless Umami
+    # tracker served from our OWN analytics subdomain (slice 7). That is not a
+    # third-party CDN — it is self-hosted on the same VPS — so we relax the
+    # slice-8 "zero external requests" rule to permit that one script src and
+    # nothing else. The SVG xmlns is a namespace identifier, not a fetched URL.
+    allowed_src = "https://" + ANALYTICS_HOST + "/script.js"
     for page in (SENDER_PAGE, RECEIVER_PAGE):
         body = page.replace('xmlns="http://www.w3.org/2000/svg"', "")
+        # Strip the single permitted analytics script URL before auditing.
+        body = body.replace(allowed_src, "")
         assert "http://" not in body
         assert "https://" not in body
-        for needle in ("src=", "@import", "cdn", "googleapis", "<link"):
+        # Third-party CDNs / font hosts / stylesheets stay forbidden outright.
+        for needle in ("@import", "cdn", "googleapis", "<link"):
             assert needle not in page.lower()
+        # The only external script is the analytics one: exactly one src=.
+        assert page.lower().count("src=") == 1
+
+
+def test_analytics_snippet_points_at_own_host():
+    # The tracker loads from the configured analytics host, never a third party.
+    expected = f'<script defer src="https://{ANALYTICS_HOST}/script.js"'
+    for page in (SENDER_PAGE, RECEIVER_PAGE):
+        assert expected in page
+        assert f'data-website-id="{ANALYTICS_WEBSITE_ID}"' in page
+        # No third-party analytics ever.
+        assert "google-analytics" not in page.lower()
+        assert "googletagmanager" not in page.lower()
+        assert "plausible" not in page.lower()
+
+
+def test_pages_set_no_cookies():
+    # Umami is cookieless and our own JS never touches cookies, so no consent
+    # banner is needed. Assert our code writes nothing to document.cookie.
+    for page in (SENDER_PAGE, RECEIVER_PAGE):
+        assert "document.cookie" not in page
+
+
+def test_funnel_events_are_wired():
+    # The funnel events from model/10-metrics.md fire via umami.track (tdTrack).
+    assert "tdTrack('paste')" in SENDER_PAGE
+    assert "tdTrack('code_created')" in SENDER_PAGE
+    assert "tdTrack('received')" in RECEIVER_PAGE
+    # Pro hooks exist but are guarded (Pro UI ships in another slice).
+    assert "tdTrack('pro_click')" in SENDER_PAGE
+    assert "tdTrack('pro_email')" in SENDER_PAGE
 
 
 def test_reduced_motion_is_honoured():
