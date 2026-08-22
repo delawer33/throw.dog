@@ -14,6 +14,7 @@ must never burn a one-shot throw.
 
 from __future__ import annotations
 
+import json
 from typing import Final
 
 # Sticker-punk palette and building blocks. No `%` in the template that wraps
@@ -167,7 +168,7 @@ _BONE: Final = """<svg class="bone" width="48" height="21" viewBox="0 0 46 20" a
     fill="#fff" stroke="#181207" stroke-width="3"/></svg>"""
 
 _HEAD: Final = """<!doctype html>
-<html lang="ru">
+<html lang="@@lang@@">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -253,43 +254,44 @@ function qrSVG(text){
 }
 """
 
-SENDER_PAGE: Final = _HEAD + """<body>
+_SENDER_TMPL: Final = _HEAD + """<body>
 <div class="wrap">
   <div class="top">""" + _PAW + """<b>throw.dog</b></div>
 
-  <h1><span>Кинь.</span> <span class="hl">Пёс принесёт.</span></h1>
-  <p class="sub">Вставь текст — получи короткий код и QR. Открой их на другом устройстве.</p>
+  <h1><span>@@taglineA@@</span> <span class="hl">@@taglineB@@</span></h1>
+  <p class="sub">@@sub@@</p>
 
   <div class="stage" id="stage">
     """ + _DOG + _BONE + """
 
     <div class="card">
       <div id="compose">
-        <textarea id="text" autofocus placeholder="Вставь или набери текст. Вставка бросает сразу."></textarea>
-        <button class="btn wide" id="throw" type="button">бросить 🦴</button>
+        <textarea id="text" autofocus placeholder="@@placeholder@@"></textarea>
+        <button class="btn wide" id="throw" type="button">@@throwBtn@@</button>
         <p id="error" class="error" hidden></p>
       </div>
 
       <div id="done" hidden>
-        <p class="donelabel">Набери код на другом устройстве или отсканируй QR:</p>
+        <p class="donelabel">@@doneLabel@@</p>
         <div class="codebig" id="codebig"></div>
         <div class="result">
           <div class="qr" id="qr"></div>
           <div class="resmeta">
             <div class="url" id="url"></div>
-            <button class="btn ghost" id="copyurl" type="button">копировать ссылку</button>
+            <button class="btn ghost" id="copyurl" type="button">@@copyLink@@</button>
           </div>
         </div>
-        <p class="hint">Текст удалится, как только эту ссылку откроют.</p>
-        <button class="btn wide" id="again" type="button">бросить ещё</button>
+        <p class="hint">@@hint@@</p>
+        <button class="btn wide" id="again" type="button">@@againBtn@@</button>
       </div>
     </div>
   </div>
 
-  <span class="chip">🔒 ничего не хранится — исчезает через 10 минут</span>
+  <span class="chip">@@chip@@</span>
 </div>
 
 <script>
+var T = @@__T__@@;
 """ + _QR_JS + """
 (function () {
   var text = document.getElementById('text');
@@ -318,7 +320,7 @@ SENDER_PAGE: Final = _HEAD + """<body>
 
   function send(value) {
     if (busy) { return; }
-    if (!value || !value.trim()) { fail('Пока нечего бросать.'); return; }
+    if (!value || !value.trim()) { fail(T.nothing); return; }
     busy = true;
     error.hidden = true;
     fetch('/api/throws', {
@@ -326,9 +328,9 @@ SENDER_PAGE: Final = _HEAD + """<body>
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: value })
     }).then(function (response) {
-      if (response.status === 413) { throw new Error('Слишком большой текст — лимит 64 КБ.'); }
-      if (response.status === 400) { throw new Error('Пока нечего бросать.'); }
-      if (!response.ok) { throw new Error('Не удалось бросить. Попробуй ещё раз.'); }
+      if (response.status === 413) { throw new Error(T.tooBig); }
+      if (response.status === 400) { throw new Error(T.nothing); }
+      if (!response.ok) { throw new Error(T.throwFailed); }
       return response.json();
     }).then(function (data) {
       currentUrl = window.location.origin + '/' + data.code;
@@ -339,7 +341,7 @@ SENDER_PAGE: Final = _HEAD + """<body>
       done.hidden = false;
       throwAnim();
     }).catch(function (err) {
-      fail(err && err.message ? err.message : 'Проблема сети. Попробуй ещё раз.');
+      fail(err && err.message ? err.message : T.netSend);
     }).then(function () {
       busy = false;
     });
@@ -361,7 +363,7 @@ SENDER_PAGE: Final = _HEAD + """<body>
 
   document.getElementById('copyurl').addEventListener('click', function () {
     var button = document.getElementById('copyurl');
-    function ok() { button.textContent = 'скопировано'; setTimeout(function () { button.textContent = 'копировать ссылку'; }, 1500); }
+    function ok() { button.textContent = T.copied; setTimeout(function () { button.textContent = T.copyLink; }, 1500); }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(currentUrl).then(ok, function () {});
     }
@@ -381,26 +383,27 @@ SENDER_PAGE: Final = _HEAD + """<body>
 </html>
 """
 
-RECEIVER_PAGE: Final = _HEAD + """<body>
+_RECEIVER_TMPL: Final = _HEAD + """<body>
 <div class="wrap">
   <div class="top">""" + _PAW + """<b>throw.dog</b></div>
 
   <div class="stage">
     """ + _DOG + """
     <div class="card">
-      <p id="status">Приношу…</p>
+      <p id="status">@@fetching@@</p>
 
       <div id="result" hidden>
         <pre id="text"></pre>
-        <button class="btn ghost" id="copy" type="button">копировать</button>
+        <button class="btn ghost" id="copy" type="button">@@copyBtn@@</button>
       </div>
     </div>
   </div>
 
-  <span class="chip">🔒 ничего не хранится — исчезает через 10 минут</span>
+  <span class="chip">@@chip@@</span>
 </div>
 
 <script>
+var T = @@__T__@@;
 (function () {
   var status = document.getElementById('status');
   var result = document.getElementById('result');
@@ -409,8 +412,8 @@ RECEIVER_PAGE: Final = _HEAD + """<body>
 
   fetch('/api/throws/' + encodeURIComponent(code), { method: 'POST' })
     .then(function (response) {
-      if (response.status === 404) { throw new Error('Ничего нет — истекло, уже прочитано или не существовало.'); }
-      if (!response.ok) { throw new Error('Что-то пошло не так. Обнови страницу.'); }
+      if (response.status === 404) { throw new Error(T.notFound); }
+      if (!response.ok) { throw new Error(T.wrong); }
       return response.json();
     })
     .then(function (data) {
@@ -420,13 +423,13 @@ RECEIVER_PAGE: Final = _HEAD + """<body>
     })
     .catch(function (err) {
       status.className = 'error';
-      status.textContent = err && err.message ? err.message : 'Проблема сети. Обнови страницу.';
+      status.textContent = err && err.message ? err.message : T.netRecv;
     });
 
   document.getElementById('copy').addEventListener('click', function () {
     var button = document.getElementById('copy');
     var value = target.textContent;
-    function ok() { button.textContent = 'скопировано'; setTimeout(function () { button.textContent = 'копировать'; }, 1500); }
+    function ok() { button.textContent = T.copied; setTimeout(function () { button.textContent = T.copyBtn; }, 1500); }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(value).then(ok, select);
     } else {
@@ -438,7 +441,7 @@ RECEIVER_PAGE: Final = _HEAD + """<body>
       var selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
-      button.textContent = 'нажми Ctrl+C / удерживай, чтобы скопировать';
+      button.textContent = T.selectFallback;
     }
   });
 })();
@@ -446,5 +449,131 @@ RECEIVER_PAGE: Final = _HEAD + """<body>
 </body>
 </html>
 """
+
+# --- i18n -------------------------------------------------------------------
+#
+# Every user-facing string lives here, EN first, RU second. Both locales carry
+# the *same* keys — no fallback gaps — so a page is fully translated or the test
+# suite fails. Detection is server-side from the ``Accept-Language`` header
+# (:func:`pick_locale`): EN is the default for any locale that isn't Russian,
+# RU only when the browser actually prefers Russian. The strings are injected
+# two ways — ``@@key@@`` tokens in the HTML, and a single ``var T = {...}`` JSON
+# blob the inline JS reads — both rendered from the one dict below.
+STRINGS: Final[dict[str, dict[str, str]]] = {
+    "en": {
+        "taglineA": "Throw it.",
+        "taglineB": "The dog fetches.",
+        "sub": "Paste text — get a short code and a QR. Open them on another device.",
+        "placeholder": "Paste or type text. Pasting throws it right away.",
+        "throwBtn": "throw 🦴",
+        "doneLabel": "Type the code on the other device, or scan the QR:",
+        "copyLink": "copy link",
+        "hint": "The text is deleted the moment this link is opened.",
+        "againBtn": "throw again",
+        "chip": "🔒 nothing is stored — gone in 10 minutes",
+        "nothing": "Nothing to throw yet.",
+        "tooBig": "Text is too big — 64 KB limit.",
+        "throwFailed": "Couldn't throw. Try again.",
+        "netSend": "Network problem. Try again.",
+        "copied": "copied",
+        "fetching": "Fetching…",
+        "copyBtn": "copy",
+        "notFound": "Nothing here — expired, already read, or never existed.",
+        "wrong": "Something went wrong. Refresh the page.",
+        "netRecv": "Network problem. Refresh the page.",
+        "selectFallback": "press Ctrl+C / long-press to copy",
+    },
+    "ru": {
+        "taglineA": "Кинь.",
+        "taglineB": "Пёс принесёт.",
+        "sub": "Вставь текст — получи короткий код и QR. Открой их на другом устройстве.",
+        "placeholder": "Вставь или набери текст. Вставка бросает сразу.",
+        "throwBtn": "бросить 🦴",
+        "doneLabel": "Набери код на другом устройстве или отсканируй QR:",
+        "copyLink": "копировать ссылку",
+        "hint": "Текст удалится, как только эту ссылку откроют.",
+        "againBtn": "бросить ещё",
+        "chip": "🔒 ничего не хранится — исчезает через 10 минут",
+        "nothing": "Пока нечего бросать.",
+        "tooBig": "Слишком большой текст — лимит 64 КБ.",
+        "throwFailed": "Не удалось бросить. Попробуй ещё раз.",
+        "netSend": "Проблема сети. Попробуй ещё раз.",
+        "copied": "скопировано",
+        "fetching": "Приношу…",
+        "copyBtn": "копировать",
+        "notFound": "Ничего нет — истекло, уже прочитано или не существовало.",
+        "wrong": "Что-то пошло не так. Обнови страницу.",
+        "netRecv": "Проблема сети. Обнови страницу.",
+        "selectFallback": "нажми Ctrl+C / удерживай, чтобы скопировать",
+    },
+}
+
+DEFAULT_LOCALE: Final = "en"
+
+
+def pick_locale(accept_language: str | None) -> str:
+    """Pick ``"ru"`` or ``"en"`` from an ``Accept-Language`` header.
+
+    RU only when the browser's most-preferred language (highest q-value) is
+    Russian; EN is the default for everything else, including a missing or
+    unparseable header. We compare against the whole ranked list rather than
+    just the first entry so ``en;q=0.5, ru;q=0.9`` correctly resolves to RU.
+    """
+    if not accept_language:
+        return DEFAULT_LOCALE
+    best_lang = DEFAULT_LOCALE
+    best_q = -1.0
+    for part in accept_language.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        tag, _, params = token.partition(";")
+        tag = tag.strip().lower()
+        if not tag or tag == "*":
+            continue
+        q = 1.0
+        params = params.strip()
+        if params.lower().startswith("q="):
+            try:
+                q = float(params[2:])
+            except ValueError:
+                q = 1.0
+        if q > best_q:
+            best_q = q
+            best_lang = "ru" if tag.split("-")[0] == "ru" else "en"
+    return best_lang
+
+
+def _render(template: str, lang: str) -> str:
+    """Fill a page template's ``@@key@@`` tokens and ``var T`` blob for ``lang``."""
+    strings = STRINGS[lang]
+    out = template.replace("@@__T__@@", json.dumps(strings, ensure_ascii=False))
+    out = out.replace("@@lang@@", lang)
+    for key, value in strings.items():
+        out = out.replace(f"@@{key}@@", value)
+    return out
+
+
+def render_sender(lang: str = DEFAULT_LOCALE) -> str:
+    return _render(_SENDER_TMPL, lang)
+
+
+def render_receiver(lang: str = DEFAULT_LOCALE) -> str:
+    return _render(_RECEIVER_TMPL, lang)
+
+
+def sender_page(accept_language: str | None = None) -> str:
+    return render_sender(pick_locale(accept_language))
+
+
+def receiver_page(accept_language: str | None = None) -> str:
+    return render_receiver(pick_locale(accept_language))
+
+
+#: EN-rendered pages, kept as module constants so callers and the slice-8
+#: page-size test can import a ready string. Locale-aware serving uses the
+#: ``*_page(accept_language)`` helpers above.
+SENDER_PAGE: Final = render_sender(DEFAULT_LOCALE)
+RECEIVER_PAGE: Final = render_receiver(DEFAULT_LOCALE)
 
 ROBOTS_TXT: Final = "User-agent: *\nDisallow: /\n"
