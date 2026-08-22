@@ -34,7 +34,13 @@ from app.gatekeeper import (
     Gatekeeper,
     ReadOutcome,
 )
-from app.pages import ROBOTS_TXT, receiver_page, sender_page
+from app.pages import (
+    PRIVACY_PAGE,
+    ROBOTS_TXT,
+    TERMS_PAGE,
+    receiver_page,
+    sender_page,
+)
 from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 
 DEFAULT_TTL_SECONDS = 600
@@ -405,6 +411,20 @@ def create_app(
         # Locale (EN default, RU when the browser prefers it) is decided from
         # Accept-Language; the page is otherwise identical for everyone.
         return HTMLResponse(sender_page(request.headers.get("accept-language")))
+
+    # Static legal pages, English-only (see app.pages). Registered before the
+    # ``/{code}`` catch-all so those words never resolve as receiver codes.
+    # noindex is covered the same way as every page: the <meta robots> in the
+    # shell plus the X-Robots-Tag middleware above. The abuse@ address on these
+    # pages needs a matching Cloudflare Email Routing rule — a manual founder
+    # step, not provisioned here.
+    @app.get("/terms", response_class=HTMLResponse)
+    async def get_terms_page() -> HTMLResponse:
+        return HTMLResponse(TERMS_PAGE)
+
+    @app.get("/privacy", response_class=HTMLResponse)
+    async def get_privacy_page() -> HTMLResponse:
+        return HTMLResponse(PRIVACY_PAGE)
 
     @app.get("/{code}", response_class=HTMLResponse)
     async def get_receiver_page(code: str, request: Request) -> HTMLResponse:
