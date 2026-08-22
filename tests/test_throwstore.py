@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from app.throwstore import OutOfCodes, ThrowStore
+from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 
 
 class FakeClock:
@@ -142,3 +142,47 @@ def test_rejects_nonsense_configuration():
         ThrowStore(ttl_seconds=0)
     with pytest.raises(ValueError):
         ThrowStore(code_attempts=0)
+
+
+def test_store_refuses_new_throws_past_the_entry_ceiling():
+    store = ThrowStore(ttl_seconds=600, clock=FakeClock(), max_entries=2)
+
+    store.put("one")
+    store.put("two")
+
+    with pytest.raises(StoreFull):
+        store.put("three")
+
+
+def test_store_refuses_new_throws_past_the_memory_ceiling():
+    store = ThrowStore(ttl_seconds=600, clock=FakeClock(), max_total_bytes=10)
+
+    store.put("x" * 8)
+
+    with pytest.raises(StoreFull):
+        store.put("x" * 8)
+
+
+def test_reading_a_throw_frees_its_room():
+    store = ThrowStore(ttl_seconds=600, clock=FakeClock(), max_total_bytes=10)
+    code = store.put("x" * 8)
+
+    assert store.total_bytes() == 8
+    store.take(code)
+
+    assert store.total_bytes() == 0
+    store.put("x" * 8)  # room is back
+
+
+def test_expired_throws_are_swept_without_anyone_asking_for_them():
+    clock = FakeClock()
+    store = ThrowStore(ttl_seconds=60, clock=clock)
+    for _ in range(5):
+        store.put("secret")
+
+    clock.advance(600)
+    swept = store.purge_expired()
+
+    assert swept == 5
+    assert store.size() == 0
+    assert store.total_bytes() == 0

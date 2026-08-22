@@ -23,15 +23,25 @@ from app.codewords import generate as generate_code
 DEFAULT_TTL_SECONDS: float = 600.0
 _DEFAULT_CODE_ATTEMPTS = 50
 
+#: Ceilings so a flood of throws cannot eat the box. The code space alone is
+#: no ceiling: every code filled with a max-size throw would be gigabytes.
+DEFAULT_MAX_ENTRIES = 10_000
+DEFAULT_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+
 
 class OutOfCodes(RuntimeError):
     """Raised when no unused code could be found for a new throw."""
+
+
+class StoreFull(RuntimeError):
+    """Raised when the store is at its entry or memory ceiling."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Entry:
     text: str
     expires_at: float
+    size_bytes: int
 
 
 class ThrowStore:
@@ -43,6 +53,8 @@ class ThrowStore:
             that wall-clock jumps cannot resurrect or kill throws early.
         code_generator: callable returning a candidate code.
         code_attempts: how many candidates to try before giving up.
+        max_entries: how many throws may be alive at once.
+        max_total_bytes: how much throw text may be resident at once.
     """
 
     def __init__(
@@ -51,17 +63,26 @@ class ThrowStore:
         clock: Callable[[], float] = time.monotonic,
         code_generator: Callable[[], str] = generate_code,
         code_attempts: int = _DEFAULT_CODE_ATTEMPTS,
+        max_entries: int = DEFAULT_MAX_ENTRIES,
+        max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         if code_attempts < 1:
             raise ValueError("code_attempts must be at least 1")
+        if max_entries < 1:
+            raise ValueError("max_entries must be at least 1")
+        if max_total_bytes < 1:
+            raise ValueError("max_total_bytes must be at least 1")
         self._ttl_seconds = float(ttl_seconds)
         self._clock = clock
         self._generate_code = code_generator
         self._code_attempts = code_attempts
+        self._max_entries = max_entries
+        self._max_total_bytes = max_total_bytes
         self._lock = threading.Lock()
         self._entries: dict[str, _Entry] = {}
+        self._total_bytes = 0
 
     @property
     def ttl_seconds(self) -> float:
@@ -71,13 +92,21 @@ class ThrowStore:
         """Store ``text`` and return the code that will fetch it back once."""
         now = self._clock()
         expires_at = now + self._ttl_seconds
+        size_bytes = len(text.encode("utf-8"))
         with self._lock:
             self._purge_expired(now)
+            if len(self._entries) >= self._max_entries:
+                raise StoreFull("too many live throws")
+            if self._total_bytes + size_bytes > self._max_total_bytes:
+                raise StoreFull("live throws would exceed the memory ceiling")
             for _ in range(self._code_attempts):
                 code = self._generate_code()
                 if code in self._entries:
                     continue
-                self._entries[code] = _Entry(text=text, expires_at=expires_at)
+                self._entries[code] = _Entry(
+                    text=text, expires_at=expires_at, size_bytes=size_bytes
+                )
+                self._total_bytes += size_bytes
                 return code
         raise OutOfCodes("could not find an unused code")
 
@@ -91,6 +120,8 @@ class ThrowStore:
         with self._lock:
             self._purge_expired(now)
             entry = self._entries.pop(code, None)
+            if entry is not None:
+                self._total_bytes -= entry.size_bytes
         if entry is None:
             return None
         return entry.text
@@ -102,8 +133,29 @@ class ThrowStore:
             self._purge_expired(now)
             return len(self._entries)
 
+    def total_bytes(self) -> int:
+        """Bytes of throw text currently resident (sweeps the dead first)."""
+        now = self._clock()
+        with self._lock:
+            self._purge_expired(now)
+            return self._total_bytes
+
+    def purge_expired(self) -> int:
+        """Drop everything past its deadline; return how many died.
+
+        Public because nobody may ever come back for an expired throw, and
+        its plaintext must not sit in memory waiting for the next request.
+        A caller (the app's lifespan) sweeps on a timer.
+        """
+        now = self._clock()
+        with self._lock:
+            before = len(self._entries)
+            self._purge_expired(now)
+            return before - len(self._entries)
+
     def _purge_expired(self, now: float) -> None:
         """Drop everything past its deadline. Caller holds the lock."""
         dead = [code for code, entry in self._entries.items() if entry.expires_at <= now]
         for code in dead:
+            self._total_bytes -= self._entries[code].size_bytes
             del self._entries[code]

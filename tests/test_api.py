@@ -155,3 +155,46 @@ def test_settings_come_from_env_when_present():
         {"THROW_TTL_SECONDS": "30", "THROW_MAX_BYTES": "1024", "THROW_MISS_DELAY_MS": "0"}
     )
     assert (settings.ttl_seconds, settings.max_bytes, settings.miss_delay_ms) == (30.0, 1024, 0)
+
+
+def test_oversized_body_is_rejected_without_buffering_it_all(client):
+    # Ten megabytes of JSON: the limit must bite on the way in, not after
+    # the whole flood is resident in memory.
+    huge = '{"text":"' + "z" * (10 * 1024 * 1024) + '"}'
+
+    response = client.post(
+        "/api/throws", content=huge, headers={"Content-Type": "application/json"}
+    )
+
+    assert response.status_code == 413
+    assert "too big" in response.json()["detail"]
+
+
+def test_oversized_body_is_refused_on_its_declared_length_alone(client):
+    # Content-Length is the cheapest possible check: no body read at all.
+    response = client.post(
+        "/api/throws",
+        content=b"",
+        headers={"Content-Type": "application/json", "Content-Length": str(50 * 1024 * 1024)},
+    )
+
+    assert response.status_code == 413
+
+
+def test_malformed_body_is_a_plain_bad_request(client):
+    assert client.post("/api/throws", content=b"not json").status_code == 400
+    assert client.post("/api/throws", json={"txet": "typo"}).status_code == 400
+    assert client.post("/api/throws", json={"text": 42}).status_code == 400
+
+
+def test_a_full_store_answers_busy_rather_than_failing(client):
+    from app.throwstore import ThrowStore
+
+    full = create_app(TEST_SETTINGS, store=ThrowStore(ttl_seconds=600, max_entries=1))
+    with TestClient(full) as busy_client:
+        assert busy_client.post("/api/throws", json={"text": "first"}).status_code == 201
+
+        response = busy_client.post("/api/throws", json={"text": "second"})
+
+    assert response.status_code == 503
+    assert "busy" in response.json()["detail"]
