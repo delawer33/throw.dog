@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.gatekeeper import Gatekeeper
 from app.main import Settings, create_app
 
 # Zero delay on misses: the production one-second pause is an anti-guessing
@@ -185,6 +186,40 @@ def test_malformed_body_is_a_plain_bad_request(client):
     assert client.post("/api/throws", content=b"not json").status_code == 400
     assert client.post("/api/throws", json={"txet": "typo"}).status_code == 400
     assert client.post("/api/throws", json={"text": 42}).status_code == 400
+
+
+def test_a_read_under_tarpit_is_byte_identical_to_an_ordinary_miss():
+    # A global threshold of one means a single recorded miss shuts the gate on
+    # everyone. The tarpitted reply must be indistinguishable from a plain
+    # miss, or the tarpit itself would leak "this code exists".
+    gate = Gatekeeper(global_miss_threshold=1)
+    app = create_app(TEST_SETTINGS, gatekeeper=gate)
+    with TestClient(app) as c:
+        code = throw(c, "still reachable while the gate is open")
+
+        # A hit does not count against anyone: the read path still works.
+        opened = c.post(f"/api/throws/{code}")
+        assert opened.status_code == 200
+        assert opened.json() == {"text": "still reachable while the gate is open"}
+
+        ordinary_miss = c.post("/api/throws/never-existed")  # trips the global flood
+        tarpitted = c.post("/api/throws/also-never-existed")  # served under tarpit
+
+        assert ordinary_miss.status_code == tarpitted.status_code == 404
+        assert ordinary_miss.text == tarpitted.text
+
+
+def test_a_hammering_ip_gets_tarpitted_but_a_valid_read_still_lands_first():
+    gate = Gatekeeper(miss_budget=3)
+    app = create_app(TEST_SETTINGS, gatekeeper=gate)
+    with TestClient(app) as c:
+        code = throw(c, "beat the budget")
+        assert c.post(f"/api/throws/{code}").json() == {"text": "beat the budget"}
+
+        for _ in range(3):
+            assert c.post("/api/throws/never-existed").status_code == 404
+        # Budget spent: still a 404, but now from the tarpit, not the store.
+        assert c.post("/api/throws/never-existed").status_code == 404
 
 
 def test_a_full_store_answers_busy_rather_than_failing(client):
