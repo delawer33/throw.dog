@@ -31,7 +31,7 @@ from app.gatekeeper import (
     Gatekeeper,
     ReadOutcome,
 )
-from app.pages import RECEIVER_PAGE, ROBOTS_TXT, SENDER_PAGE
+from app.pages import ROBOTS_TXT, receiver_page, sender_page
 from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 
 DEFAULT_TTL_SECONDS = 600
@@ -270,14 +270,16 @@ def create_app(
         return JSONResponse({"text": text})
 
     @app.get("/", response_class=HTMLResponse)
-    async def sender_page() -> HTMLResponse:
-        return HTMLResponse(SENDER_PAGE)
+    async def get_sender_page(request: Request) -> HTMLResponse:
+        # Locale (EN default, RU when the browser prefers it) is decided from
+        # Accept-Language; the page is otherwise identical for everyone.
+        return HTMLResponse(sender_page(request.headers.get("accept-language")))
 
     @app.get("/{code}", response_class=HTMLResponse)
-    async def receiver_page(code: str) -> HTMLResponse:
+    async def get_receiver_page(code: str, request: Request) -> HTMLResponse:
         # Same shell for every code, valid or not: the page reveals nothing,
         # and only its POST can consume a throw.
-        return HTMLResponse(RECEIVER_PAGE)
+        return HTMLResponse(receiver_page(request.headers.get("accept-language")))
 
     return app
 
