@@ -1,0 +1,33 @@
+# Промежуточный режим: домена ещё нет, ходим по временному имени
+# (например 94.241.172.33.sslip.io) с настоящим сертификатом Let's Encrypt.
+#
+# Зачем не самоподписанный: замер ворот этапа 0 должен идти через тот же
+# транспорт, что боевой — с реальным TLS-рукопожатием и без страницы
+# «соединение небезопасно», которая крадёт секунды и ломает измерение.
+#
+# Когда домен куплен и заведён в Cloudflare — переключаемся обратно на
+# основной Caddyfile (переменная CADDYFILE в .env) с сертификатом Origin CA.
+{
+	admin off
+}
+
+{$SITE_DOMAIN} {
+	# tls-директивы нет: Caddy сам получит сертификат по ACME (HTTP-01),
+	# поэтому порт 80 должен быть открыт наружу.
+	encode zstd gzip
+
+	log {
+		output stdout
+		format console
+	}
+
+	reverse_proxy app:{$APP_PORT} {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 30s
+			read_timeout 60s
+			write_timeout 60s
+		}
+		header_up X-Real-IP {remote_host}
+	}
+}

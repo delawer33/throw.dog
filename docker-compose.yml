@@ -41,7 +41,9 @@ services:
       - "${CADDY_HTTP_PORT:-80}:80"
       - "${CADDY_HTTPS_PORT:-443}:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Какой конфиг Caddy подсунуть: боевой (Origin CA за Cloudflare) или
+      # промежуточный Caddyfile.acme, пока домена нет. См. CADDYFILE в .env.
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       # Сертификат Cloudflare Origin CA. Лежит только на сервере, в git его нет.
       - ./certs:/etc/caddy/certs:ro
       - caddy_data:/data
