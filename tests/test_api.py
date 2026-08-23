@@ -4,9 +4,9 @@ from fastapi.testclient import TestClient
 from app.gatekeeper import Gatekeeper
 from app.main import Settings, code_pseudonym, create_app, sanitize_log_path
 
-# Zero delay on misses: the production one-second pause is an anti-guessing
-# measure, not behaviour worth waiting for in tests.
-TEST_SETTINGS = Settings(miss_delay_ms=0)
+# Zero delay on misses: the production one-second pause (and the longer tarpit
+# pause) is an anti-guessing measure, not behaviour worth waiting for in tests.
+TEST_SETTINGS = Settings(miss_delay_ms=0, gate_tarpit_delay_ms=0)
 
 
 @pytest.fixture()
@@ -352,6 +352,93 @@ def test_a_hammering_ip_gets_tarpitted_but_a_valid_read_still_lands_first():
             assert c.post("/api/throws/never-existed").status_code == 404
         # Budget spent: still a 404, but now from the tarpit, not the store.
         assert c.post("/api/throws/never-existed").status_code == 404
+
+
+def test_a_valid_code_reads_even_when_the_ip_is_over_its_miss_budget():
+    # The core use case: an abuser and an honest reader share one NAT'd IP. The
+    # abuser burns the per-IP miss budget; the honest reader still holds a VALID
+    # code and MUST get their throw. Gating a hit would deny honest readers —
+    # exactly the defect this fix removes.
+    gate = Gatekeeper(miss_budget=3)
+    app = create_app(TEST_SETTINGS, gatekeeper=gate)
+    with TestClient(app) as c:
+        code = throw(c, "reach me from a burnt IP")
+
+        # Burn the budget past its ceiling from this IP.
+        for _ in range(5):
+            assert c.post("/api/throws/never-existed").status_code == 404
+        assert gate.allow("testclient") is False  # confirm the IP is over budget
+
+        # The valid code still reads — the hit bypasses the gate entirely.
+        landed = c.post(f"/api/throws/{code}")
+        assert landed.status_code == 200
+        assert landed.json() == {"text": "reach me from a burnt IP"}
+
+
+def test_a_valid_code_reads_even_while_the_global_tarpit_is_engaged():
+    # A global threshold of one means a single recorded miss shuts the door on
+    # everyone. A holder of a valid code must still be served — hits never gate.
+    gate = Gatekeeper(global_miss_threshold=1)
+    app = create_app(TEST_SETTINGS, gatekeeper=gate)
+    with TestClient(app) as c:
+        code = throw(c, "reach me under the flood")
+
+        assert c.post("/api/throws/never-existed").status_code == 404  # trip global
+        assert gate.allow("anyone") is False  # confirm the global tarpit is on
+
+        landed = c.post(f"/api/throws/{code}")
+        assert landed.status_code == 200
+        assert landed.json() == {"text": "reach me under the flood"}
+
+
+def test_an_over_budget_miss_is_byte_identical_to_an_ordinary_miss():
+    # The tarpit only lengthens the delay; the body must not change, or an
+    # over-budget IP could tell a real code from a fake one by its reply bytes.
+    gate = Gatekeeper(miss_budget=3)
+    app = create_app(TEST_SETTINGS, gatekeeper=gate)
+    with TestClient(app) as c:
+        ordinary = c.post("/api/throws/never-existed")  # within budget
+        for _ in range(4):
+            c.post("/api/throws/never-existed")  # spend the budget
+        assert gate.allow("testclient") is False
+        tarpitted = c.post("/api/throws/still-never-existed")  # over budget
+
+        assert ordinary.status_code == tarpitted.status_code == 404
+        assert ordinary.text == tarpitted.text
+
+
+def test_a_tarpitted_miss_sleeps_longer_than_an_ordinary_miss(monkeypatch):
+    # Observe the delay via the injected sleep, not the wall clock: a tarpitted
+    # miss must add the configured tarpit delay on top of the base miss delay.
+    # The TestClient is used WITHOUT its context manager so the lifespan sweeper
+    # (which also awaits asyncio.sleep) never starts and spins on the fake sleep.
+    import app.main as main
+
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    gate = Gatekeeper(miss_budget=3)
+    settings = Settings(miss_delay_ms=1000, gate_tarpit_delay_ms=4000)
+    app = create_app(settings, gatekeeper=gate)
+    c = TestClient(app)
+    c.post("/api/throws/never-existed")
+    assert slept[-1] == pytest.approx(1.0)  # base miss delay only
+
+    for _ in range(4):
+        c.post("/api/throws/never-existed")  # push over budget
+    assert slept[-1] == pytest.approx(5.0)  # base + tarpit extra
+
+
+def test_the_tarpit_delay_comes_from_env():
+    settings = Settings.from_env({"THROW_GATE_TARPIT_DELAY_MS": "2500"})
+    assert settings.gate_tarpit_delay_ms == 2500
+
+    default = Settings.from_env({})
+    assert default.gate_tarpit_delay_ms == 4000
 
 
 def test_trusted_proxy_gives_each_forwarded_ip_its_own_budget():
