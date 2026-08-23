@@ -6,10 +6,34 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: throwdog_app
-    # Все настройки приложения приходят из .env (TTL, лимит, задержка промаха).
-    env_file: .env
+    # SECURITY: приложение смотрит в интернет, поэтому в контейнер попадают
+    # ТОЛЬКО его собственные переменные. Раньше здесь был `env_file: .env`,
+    # который тащил в app весь .env — включая UMAMI_DB_PASSWORD и
+    # UMAMI_APP_SECRET, которые приложению не нужны и утекли бы при компрометации.
+    # Список-форма `- VAR` пробрасывает переменную из окружения compose
+    # (авто-загружаемый .env) ТОЛЬКО если она задана; если нет — не задаётся, и
+    # приложение берёт свои значения по умолчанию (см. app/main.py). Umami и
+    # umami_db читают свои секреты через собственные `environment:` ниже.
     environment:
-      APP_PORT: ${APP_PORT:-8000}
+      - APP_PORT=${APP_PORT:-8000}
+      # Аналитика: читаются рендером страниц (app/pages.py).
+      - ANALYTICS_HOST
+      - ANALYTICS_WEBSITE_ID
+      # Поведение броска и гейткипера (все опциональны, дефолты в коде).
+      - THROW_TTL_SECONDS
+      - THROW_MAX_BYTES
+      - THROW_MISS_DELAY_MS
+      - THROW_GATE_TARPIT_DELAY_MS
+      - THROW_SWEEP_INTERVAL_SECONDS
+      - THROW_GATE_WINDOW_SECONDS
+      - THROW_GATE_MISS_BUDGET
+      - THROW_GATE_GLOBAL_WINDOW_SECONDS
+      - THROW_GATE_GLOBAL_MISS_THRESHOLD
+      - THROW_GATE_MAX_TRACKED_IPS
+      - THROW_TRUSTED_PROXY
+      - THROW_FORWARDED_HEADER
+      - THROW_PRO_EMAILS_PATH
+      - THROW_LOG_HMAC_SECRET
     # Порт не публикуется на хост: снаружи ходит только Caddy.
     expose:
       - "${APP_PORT:-8000}"
@@ -55,7 +79,7 @@ services:
 
   # Postgres backing Umami. Its data lives in a named volume, not the app's.
   umami_db:
-    image: postgres:15-alpine
+    image: postgres:15.14-alpine
     container_name: throwdog_umami_db
     environment:
       POSTGRES_DB: ${UMAMI_DB_NAME:-umami}
@@ -74,7 +98,7 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.10.2-alpine
     container_name: throwdog_caddy
     depends_on:
       app:
