@@ -47,6 +47,12 @@ from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 DEFAULT_TTL_SECONDS = 600
 DEFAULT_MAX_BYTES = 65536
 DEFAULT_MISS_DELAY_MS = 1000
+#: Extra delay added on TOP of the base miss delay when the gatekeeper says this
+#: IP is over its miss-budget, or the global tarpit is engaged. Deliberately much
+#: larger than the base miss delay so enumeration from abusive sources is slow,
+#: while an honest reader (who holds a valid code, and so gets a HIT, never a
+#: gated miss) is never affected.
+DEFAULT_GATE_TARPIT_DELAY_MS = 4000
 DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0
 
 #: Where Pro fake-door email captures are appended. Defaults to a file on the
@@ -94,6 +100,10 @@ class Settings:
     ttl_seconds: float = DEFAULT_TTL_SECONDS
     max_bytes: int = DEFAULT_MAX_BYTES
     miss_delay_ms: int = DEFAULT_MISS_DELAY_MS
+    #: Extra delay on a tarpitted miss, added on top of ``miss_delay_ms``. Only
+    #: ever applies to misses from an over-budget IP (or under the global
+    #: tarpit); hits never touch the gate, so honest readers never see it.
+    gate_tarpit_delay_ms: int = DEFAULT_GATE_TARPIT_DELAY_MS
     sweep_interval_seconds: float = DEFAULT_SWEEP_INTERVAL_SECONDS
     gate_window_seconds: float = DEFAULT_WINDOW_SECONDS
     gate_miss_budget: int = DEFAULT_MISS_BUDGET
@@ -120,6 +130,9 @@ class Settings:
             ttl_seconds=float(source.get("THROW_TTL_SECONDS", DEFAULT_TTL_SECONDS)),
             max_bytes=int(source.get("THROW_MAX_BYTES", DEFAULT_MAX_BYTES)),
             miss_delay_ms=int(source.get("THROW_MISS_DELAY_MS", DEFAULT_MISS_DELAY_MS)),
+            gate_tarpit_delay_ms=int(
+                source.get("THROW_GATE_TARPIT_DELAY_MS", DEFAULT_GATE_TARPIT_DELAY_MS)
+            ),
             sweep_interval_seconds=float(
                 source.get("THROW_SWEEP_INTERVAL_SECONDS", DEFAULT_SWEEP_INTERVAL_SECONDS)
             ),
@@ -346,6 +359,7 @@ def create_app(
         max_tracked_ips=config.gate_max_tracked_ips,
     )
     miss_delay_seconds = config.miss_delay_ms / 1000.0
+    tarpit_delay_seconds = config.gate_tarpit_delay_ms / 1000.0
     max_body_bytes = config.max_bytes * _BODY_SLACK_FACTOR + _BODY_SLACK_BYTES
 
     @asynccontextmanager
@@ -382,10 +396,16 @@ def create_app(
         response.headers["X-Robots-Tag"] = "noindex, nofollow"
         return response
 
-    async def miss() -> JSONResponse:
-        # Constant delay so that a guesser learns nothing from timing.
-        if miss_delay_seconds > 0:
-            await asyncio.sleep(miss_delay_seconds)
+    async def miss(*, tarpitted: bool = False) -> JSONResponse:
+        # The body is byte-identical for every miss (see MISS_BODY); only the
+        # delay varies, and it varies uniformly for ALL of an IP's misses — an
+        # existing code and a non-existent one are indistinguishable, so timing
+        # never leaks whether a code existed. A tarpitted miss (over-budget IP
+        # or global tarpit) pays an extra delay on top of the base, making
+        # enumeration from abusive sources slow.
+        delay = miss_delay_seconds + (tarpit_delay_seconds if tarpitted else 0.0)
+        if delay > 0:
+            await asyncio.sleep(delay)
         return JSONResponse(MISS_BODY, status_code=404)
 
     @app.get("/healthz")
@@ -442,24 +462,28 @@ def create_app(
 
     @app.post("/api/throws/{code}")
     async def take_throw(code: str, request: Request) -> Response:
-        # The gate decides before the store is ever touched. A tarpitted read
-        # returns the ordinary slow miss — byte-identical — so an attacker over
-        # budget learns nothing about whether the code existed.
+        # The store is consulted FIRST, and a HIT is served unconditionally: a
+        # reader who holds a valid code is never gated, so honest reads survive
+        # even when this IP shares a NAT with an abuser (the core use case) or
+        # the global tarpit is engaged. The gate only governs MISSES — it makes
+        # enumeration slower, it does not lock out anyone holding a real code.
         ip = client_ip(request, config)
-        if not gate.allow(ip):
-            return await miss()
 
         canonical = normalize(code)
-        if canonical is None:
-            gate.record(ip, ReadOutcome.MISS)
-            return await miss()
-        text = throws.take(canonical)
-        if text is None:
-            gate.record(ip, ReadOutcome.MISS)
-            return await miss()
-        gate.record(ip, ReadOutcome.HIT)
-        log_event("read", canonical)
-        return JSONResponse({"text": text})
+        text = throws.take(canonical) if canonical is not None else None
+        if text is not None:
+            # A hit is free: recorded as such (a no-op for counting) and never
+            # rate-limited. One-time-take semantics are unchanged.
+            gate.record(ip, ReadOutcome.HIT)
+            log_event("read", canonical)
+            return JSONResponse({"text": text})
+
+        # A miss: count it, then let the (now-updated) gate decide whether this
+        # IP is over budget or the global tarpit is engaged. Either way the body
+        # is byte-identical; only the delay grows.
+        gate.record(ip, ReadOutcome.MISS)
+        tarpitted = not gate.allow(ip)
+        return await miss(tarpitted=tarpitted)
 
     @app.post("/api/pro-interest")
     async def pro_interest(request: Request) -> JSONResponse:
