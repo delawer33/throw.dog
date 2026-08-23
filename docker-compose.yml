@@ -58,18 +58,32 @@ services:
 
   # Self-hosted Umami — cookieless product analytics on the same VPS. Served
   # behind Caddy on the analytics subdomain; never publishes a host port.
+  #
+  # DEPLOY GATE: umami/umami_db live behind the "analytics" compose profile, so
+  # a plain `docker compose up -d` (interim/sslip.io, pre-domain) does NOT start
+  # them — analytics rides with the domain. Bring them up explicitly with
+  #   docker compose --profile analytics up -d
+  # once the domain is set, ANALYTICS_DOMAIN points at the subdomain, and you've
+  # set UMAMI_APP_SECRET / UMAMI_DB_PASSWORD (see DEPLOY.md).
   umami:
     image: ghcr.io/umami-software/umami:postgresql-v2.14.0
     container_name: throwdog_umami
+    profiles: ["analytics"]
     depends_on:
       umami_db:
         condition: service_healthy
     environment:
       # Prisma connection string built from the DB creds below.
-      DATABASE_URL: postgresql://${UMAMI_DB_USER:-umami}:${UMAMI_DB_PASSWORD:?UMAMI_DB_PASSWORD is required}@umami_db:5432/${UMAMI_DB_NAME:-umami}
+      # NB: compose interpolates every service (even profiled-out ones), so
+      # these use empty defaults rather than `:?` — otherwise a plain app-only
+      # `docker compose up` would fail on unset Umami secrets. When you DO run
+      # the analytics profile, set UMAMI_DB_PASSWORD / UMAMI_APP_SECRET in .env:
+      # an empty password makes postgres refuse to init and umami refuse to
+      # sign, so it still fails fast at runtime, just not at parse time.
+      DATABASE_URL: postgresql://${UMAMI_DB_USER:-umami}:${UMAMI_DB_PASSWORD:-}@umami_db:5432/${UMAMI_DB_NAME:-umami}
       DATABASE_TYPE: postgresql
-      # Signs sessions/tokens. Operator MUST set a long random value.
-      APP_SECRET: ${UMAMI_APP_SECRET:?UMAMI_APP_SECRET is required}
+      # Signs sessions/tokens. Operator MUST set a long random value (analytics profile).
+      APP_SECRET: ${UMAMI_APP_SECRET:-}
     # Internal only — Caddy reaches it at umami:3000 over the compose network.
     expose:
       - "3000"
@@ -81,10 +95,13 @@ services:
   umami_db:
     image: postgres:15.14-alpine
     container_name: throwdog_umami_db
+    profiles: ["analytics"]
     environment:
       POSTGRES_DB: ${UMAMI_DB_NAME:-umami}
       POSTGRES_USER: ${UMAMI_DB_USER:-umami}
-      POSTGRES_PASSWORD: ${UMAMI_DB_PASSWORD:?UMAMI_DB_PASSWORD is required}
+      # Empty default so app-only compose renders; set it for the analytics
+      # profile — postgres refuses to init without a password (fail-fast).
+      POSTGRES_PASSWORD: ${UMAMI_DB_PASSWORD:-}
     volumes:
       - umami_db_data:/var/lib/postgresql/data
     healthcheck:
@@ -100,16 +117,18 @@ services:
   caddy:
     image: caddy:2.10.2-alpine
     container_name: throwdog_caddy
+    # Caddy depends only on the app. It does NOT depend on umami: the analytics
+    # upstream is optional (analytics profile), and reverse_proxy tolerates an
+    # upstream that appears later, so no hard dependency is needed.
     depends_on:
       app:
         condition: service_healthy
-      umami:
-        condition: service_started
     environment:
       SITE_DOMAIN: ${SITE_DOMAIN:?SITE_DOMAIN is required}
-      # Subdomain that serves Umami (e.g. analytics.throw.dog, or the dev
-      # sslip.io host). Must be set — Caddy has a site block for it.
-      ANALYTICS_DOMAIN: ${ANALYTICS_DOMAIN:?ANALYTICS_DOMAIN is required}
+      # Subdomain that serves Umami. Only the domain-mode Caddyfile has a site
+      # block for it; the interim Caddyfile.acme has none, so this may be empty
+      # until analytics is deployed with the domain.
+      ANALYTICS_DOMAIN: ${ANALYTICS_DOMAIN:-}
       APP_PORT: ${APP_PORT:-8000}
     ports:
       - "${CADDY_HTTP_PORT:-80}:80"

@@ -32,23 +32,7 @@
 	}
 }
 
-# Аналитика (self-hosted Umami) на поддомене. Сертификат Caddy получит по ACME
-# (HTTP-01), поэтому порт 80 должен быть открыт наружу и для этого имени.
-{$ANALYTICS_DOMAIN} {
-	encode zstd gzip
-
-	log {
-		output stdout
-		format console
-	}
-
-	reverse_proxy umami:3000 {
-		transport http {
-			dial_timeout 5s
-			response_header_timeout 30s
-			read_timeout 60s
-			write_timeout 60s
-		}
-		header_up X-Real-IP {remote_host}
-	}
-}
+# Аналитика (self-hosted Umami) в промежуточном режиме НЕ обслуживается:
+# она едет вместе с доменом. Блок аналитики живёт только в боевом Caddyfile
+# (Origin CA за Cloudflare). Здесь его сознательно нет, чтобы app-only деплой
+# на sslip.io не требовал ANALYTICS_DOMAIN и не поднимал Umami.
