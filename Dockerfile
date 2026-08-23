@@ -34,6 +34,14 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /srv
 COPY app ./app
 
+# Fake-door Pro пишет собранные имейлы в /data (named volume pro_data).
+# Приложение бежит под uid 10001, а свежий named volume наследует владельца
+# и права от каталога-точки-монтирования В ОБРАЗЕ. Поэтому создаём /data
+# заранее и отдаём его throwdog: иначе docker засеял бы volume каталогом,
+# принадлежащим root, и append_pro_email падал бы с PermissionError,
+# молча теряя все заявки. chmod 700 — список приватный.
+RUN mkdir -p /data && chown throwdog:throwdog /data && chmod 700 /data
+
 USER throwdog
 
 # Документирующий EXPOSE; реальный порт берётся из APP_PORT.
