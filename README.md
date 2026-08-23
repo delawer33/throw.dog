@@ -205,5 +205,6 @@ ssh throwdog 'cd /opt/throwdog && docker compose logs --tail 100'
 | `Caddyfile`          | TLS через Origin CA + reverse proxy на `app`                 |
 | `.env.example`       | шаблон конфигурации; реальный `.env` только на сервере       |
 | `deploy.sh`          | деплой одной командой с ноутбука                             |
+| `DEPLOY.md`          | операционные риски безопасности (Umami-пароль, Origin cert)  |
 
 Секреты (`.env`) и сертификаты (`certs/`) в git не попадают никогда.
