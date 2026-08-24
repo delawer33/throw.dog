@@ -74,9 +74,11 @@ def test_append_feedback_escapes_backslashes(tmp_path):
     assert line.endswith("a\\\\b\\nc")
 
 
-def test_the_wish_box_and_fetch_form_are_on_the_sender_page():
+def test_the_feedback_panel_and_fetch_form_are_on_the_sender_page():
     page = render_sender("en")
-    # Wish box inside the Pro panel.
+    # Feedback panel: its own chip + card, separate from the Pro fake-door.
+    assert 'id="fbchip"' in page
+    assert 'id="fbdoor"' in page
     assert 'id="fbtext"' in page
     assert "/api/feedback" in page
     # Fetch-by-code form: input + button + JS normalisation to /two-words.
@@ -89,6 +91,9 @@ def test_the_new_strings_exist_in_both_locales():
         "getLabel",
         "getPlaceholder",
         "getBtn",
+        "fbChip",
+        "fbTitle",
+        "fbIntro",
         "fbPlaceholder",
         "fbSubmit",
         "fbThanks",
