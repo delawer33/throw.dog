@@ -33,6 +33,7 @@ services:
       - THROW_TRUSTED_PROXY
       - THROW_FORWARDED_HEADER
       - THROW_PRO_EMAILS_PATH
+      - THROW_FEEDBACK_PATH
       - THROW_LOG_HMAC_SECRET
     # Порт не публикуется на хост: снаружи ходит только Caddy.
     expose:

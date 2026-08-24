@@ -56,7 +56,7 @@ _STYLE: Final = """
   .stage:hover .dog { transform: rotate(-7deg) translateY(-3px); }
   .dog .tongue { opacity: 0; transition: opacity .2s; }
   .stage.thrown .dog .tongue { opacity: 1; }
-  .stage.thrown .dog { animation: excited .5s ease .45s; }
+  .stage.thrown .dog { animation: excited .5s ease .2s; }
   @keyframes excited {
     30% { transform: translateY(-10px) rotate(4deg); }
     60% { transform: translateY(0) rotate(-4deg); }
@@ -90,7 +90,7 @@ _STYLE: Final = """
 
   /* flying bone */
   .bone { position: absolute; left: 44%; top: 34%; opacity: 0; pointer-events: none; z-index: 6; }
-  .stage.thrown .bone { animation: arc 1s ease-in forwards; }
+  .stage.thrown .bone { animation: arc .55s ease-in forwards; }
   @keyframes arc {
     0%   { opacity: 1; transform: translate(0,0) rotate(0); }
     50%  { opacity: 1; transform: translate(160px,-130px) rotate(380deg); }
@@ -114,7 +114,9 @@ _STYLE: Final = """
   .qr svg { width: 100%; height: 100%; display: block; }
   .resmeta { flex: 1 1 180px; min-width: 0; }
   .url { font: 700 15px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; margin-bottom: 10px; }
-  .stage.thrown #done { animation: pop .35s cubic-bezier(.5,1.8,.6,1) .5s backwards; }
+  /* The result pops in IMMEDIATELY — the bone flight is decoration that plays
+     alongside it, never a gate the user waits behind (soft-launch feedback). */
+  .stage.thrown #done { animation: pop .25s cubic-bezier(.5,1.8,.6,1); }
   @keyframes pop { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
   /* receiver output */
@@ -149,6 +151,15 @@ _STYLE: Final = """
     outline: none; color: var(--ink); margin-top: 12px;
   }
   .proinput:focus { border-color: var(--ink); background: #fff; }
+  textarea.proinput { min-height: 74px; resize: vertical; font: 600 15px/1.45 system-ui, sans-serif; }
+
+  /* "Got a code?" fetch-by-code form on the sender page. Soft-launch showed
+     that editing the URL by hand is not obvious to everyone, so the homepage
+     itself must accept the two words. */
+  .getcard { margin-top: 22px; padding: 16px 20px; }
+  .getrow { display: flex; gap: 10px; flex-wrap: wrap; }
+  .getrow .proinput { flex: 1 1 180px; min-width: 0; margin-top: 0; }
+  .getrow .btn { flex: none; padding: 10px 18px; }
   .error {
     color: var(--red); font-weight: 800; font-size: 14px; margin-top: 12px;
     background: #fff; border: 2px solid var(--red); border-radius: 10px; padding: 10px 12px;
@@ -360,6 +371,15 @@ _SENDER_TMPL: Final = _HEAD + """<body>
     </div>
   </div>
 
+  <div class="card getcard">
+    <p class="donelabel">@@getLabel@@</p>
+    <div class="getrow">
+      <input class="proinput" id="getcode" type="text" autocapitalize="none"
+             autocomplete="off" spellcheck="false" placeholder="@@getPlaceholder@@">
+      <button class="btn ghost" id="getgo" type="button">@@getBtn@@</button>
+    </div>
+  </div>
+
   <button class="prochip" id="prochip" type="button" data-ev="pro_click">@@proChip@@</button>
   <span class="chip">@@chip@@</span>
 
@@ -373,6 +393,14 @@ _SENDER_TMPL: Final = _HEAD + """<body>
       <p id="proerror" class="error" hidden></p>
     </div>
     <p id="prothanks" class="donelabel" hidden></p>
+
+    <div id="fbform">
+      <textarea class="proinput" id="fbtext" maxlength="2000"
+                placeholder="@@fbPlaceholder@@"></textarea>
+      <button class="btn wide ghost" id="fbsubmit" type="button">@@fbSubmit@@</button>
+      <p id="fberror" class="error" hidden></p>
+    </div>
+    <p id="fbthanks" class="donelabel" hidden></p>
   </div>
 
   <footer class="foot">
@@ -472,6 +500,22 @@ var T = @@__T__@@;
     text.focus();
   });
 
+  // Fetch-by-code: the receiver types the two words here instead of editing the
+  // URL. Anything that isn't a latin letter becomes a hyphen, so "devoid crow",
+  // "devoid_crow" and "Devoid-Crow" all land on /devoid-crow.
+  var getcode = document.getElementById('getcode');
+  function goGet() {
+    var code = (getcode.value || '').toLowerCase()
+      .replace(/[^a-z]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!code) { getcode.focus(); return; }
+    tdTrack('fetch_code');
+    window.location.href = '/' + code;
+  }
+  document.getElementById('getgo').addEventListener('click', goGet);
+  getcode.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') { event.preventDefault(); goGet(); }
+  });
+
   // Pro fake-door: chip reveals the "coming soon" panel; the email is POSTed to
   // /api/pro-interest (a POST body, never the URL, so it stays out of any log).
   // Funnel events (pro_click / pro_email) fire via tdTrack (cookieless Umami,
@@ -512,6 +556,37 @@ var T = @@__T__@@;
       proerror.hidden = false;
     }).then(function () {
       probusy = false;
+    });
+  });
+
+  // Free-form wish box inside the Pro panel: what's missing / what would make
+  // Pro worth buying. Same privacy posture as the email: POST body only.
+  var fbtext = document.getElementById('fbtext');
+  var fbform = document.getElementById('fbform');
+  var fberror = document.getElementById('fberror');
+  var fbthanks = document.getElementById('fbthanks');
+  var fbbusy = false;
+
+  document.getElementById('fbsubmit').addEventListener('click', function () {
+    if (fbbusy) { return; }
+    var value = (fbtext.value || '').trim();
+    if (!value) { fberror.textContent = T.fbEmpty; fberror.hidden = false; return; }
+    fbbusy = true; fberror.hidden = true;
+    fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: value })
+    }).then(function (response) {
+      if (!response.ok) { throw new Error(T.proNet); }
+      fbform.hidden = true;
+      fbthanks.textContent = T.fbThanks;
+      fbthanks.hidden = false;
+      tdTrack('feedback');
+    }).catch(function (err) {
+      fberror.textContent = err && err.message ? err.message : T.proNet;
+      fberror.hidden = false;
+    }).then(function () {
+      fbbusy = false;
     });
   });
 })();
@@ -638,6 +713,13 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proThanks": "thanks, you'll be first to know",
         "proBadEmail": "That doesn't look like an email.",
         "proNet": "Network problem. Try again.",
+        "getLabel": "Got a code? Fetch it here:",
+        "getPlaceholder": "two words, e.g. basted-lily",
+        "getBtn": "fetch",
+        "fbPlaceholder": "What's missing? What would make Pro worth paying for?",
+        "fbSubmit": "send feedback",
+        "fbThanks": "got it — thanks!",
+        "fbEmpty": "Write something first.",
     },
     "ru": {
         "taglineA": "Кинь.",
@@ -671,6 +753,13 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proThanks": "спасибо, сообщим первыми",
         "proBadEmail": "Это не похоже на имейл.",
         "proNet": "Проблема сети. Попробуй ещё раз.",
+        "getLabel": "Есть код? Забери здесь:",
+        "getPlaceholder": "два слова, напр. basted-lily",
+        "getBtn": "принести",
+        "fbPlaceholder": "Чего не хватает? За что купил бы Pro?",
+        "fbSubmit": "отправить отзыв",
+        "fbThanks": "принято — спасибо!",
+        "fbEmpty": "Сначала напиши что-нибудь.",
     },
 }
 
