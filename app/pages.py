@@ -381,6 +381,7 @@ _SENDER_TMPL: Final = _HEAD + """<body>
   </div>
 
   <button class="prochip" id="prochip" type="button" data-ev="pro_click">@@proChip@@</button>
+  <button class="prochip" id="fbchip" type="button">@@fbChip@@</button>
   <span class="chip">@@chip@@</span>
 
   <div class="card prodoor" id="prodoor" hidden>
@@ -393,7 +394,11 @@ _SENDER_TMPL: Final = _HEAD + """<body>
       <p id="proerror" class="error" hidden></p>
     </div>
     <p id="prothanks" class="donelabel" hidden></p>
+  </div>
 
+  <div class="card prodoor" id="fbdoor" hidden>
+    <p class="donelabel">@@fbTitle@@</p>
+    <p class="hint">@@fbIntro@@</p>
     <div id="fbform">
       <textarea class="proinput" id="fbtext" maxlength="2000"
                 placeholder="@@fbPlaceholder@@"></textarea>
@@ -559,13 +564,21 @@ var T = @@__T__@@;
     });
   });
 
-  // Free-form wish box inside the Pro panel: what's missing / what would make
-  // Pro worth buying. Same privacy posture as the email: POST body only.
+  // Feedback: its own chip and panel, deliberately separate from the Pro
+  // fake-door — this is us asking users for help, not selling. Same privacy
+  // posture as the email: POST body only, file-only storage.
+  var fbchip = document.getElementById('fbchip');
+  var fbdoor = document.getElementById('fbdoor');
   var fbtext = document.getElementById('fbtext');
   var fbform = document.getElementById('fbform');
   var fberror = document.getElementById('fberror');
   var fbthanks = document.getElementById('fbthanks');
   var fbbusy = false;
+
+  fbchip.addEventListener('click', function () {
+    fbdoor.hidden = !fbdoor.hidden;
+    if (!fbdoor.hidden) { tdTrack('feedback_open'); fbtext.focus(); }
+  });
 
   document.getElementById('fbsubmit').addEventListener('click', function () {
     if (fbbusy) { return; }
@@ -716,9 +729,12 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "getLabel": "Got a code? Fetch it here:",
         "getPlaceholder": "two words, e.g. basted-lily",
         "getBtn": "fetch",
-        "fbPlaceholder": "What's missing? What would make Pro worth paying for?",
-        "fbSubmit": "send feedback",
-        "fbThanks": "got it — thanks!",
+        "fbChip": "💬 feedback",
+        "fbTitle": "Help us make this better",
+        "fbIntro": "We've just launched. If anything felt confusing, or you wished it worked differently — a couple of words here would really help us.",
+        "fbPlaceholder": "What felt off? What's missing?",
+        "fbSubmit": "send",
+        "fbThanks": "thank you — this genuinely helps.",
         "fbEmpty": "Write something first.",
     },
     "ru": {
@@ -756,9 +772,12 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "getLabel": "Есть код? Забери здесь:",
         "getPlaceholder": "два слова, напр. basted-lily",
         "getBtn": "принести",
-        "fbPlaceholder": "Чего не хватает? За что купил бы Pro?",
-        "fbSubmit": "отправить отзыв",
-        "fbThanks": "принято — спасибо!",
+        "fbChip": "💬 отзыв",
+        "fbTitle": "Помоги сделать лучше",
+        "fbIntro": "Мы только запустились. Если что-то было непонятно или хотелось, чтобы работало иначе — пара слов здесь нам очень поможет.",
+        "fbPlaceholder": "Что смутило? Чего не хватило?",
+        "fbSubmit": "отправить",
+        "fbThanks": "спасибо — это правда помогает.",
         "fbEmpty": "Сначала напиши что-нибудь.",
     },
 }
