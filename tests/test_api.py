@@ -105,24 +105,27 @@ def test_the_receiver_page_is_the_same_for_any_code(client):
     assert known == unknown == garbage
 
 
-def test_noindex_header_is_on_every_response(client):
+def test_noindex_header_is_on_private_responses_only(client):
+    # Receiver pages are one-time secrets and the API is machinery: both stay
+    # out of every index. The homepage and legal pages are public (launch).
     code = throw(client, "private")
-    responses = [
-        client.get("/"),
+    private = [
         client.get(f"/{code}"),
         client.get("/healthz"),
-        client.get("/robots.txt"),
         client.post(f"/api/throws/{code}"),
         client.post("/api/throws/never-existed"),
     ]
-    for response in responses:
+    for response in private:
         assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+    for response in (client.get("/"), client.get("/robots.txt")):
+        assert "X-Robots-Tag" not in response.headers
 
 
-def test_robots_txt_bans_everything(client):
+def test_robots_txt_bans_only_the_api(client):
     response = client.get("/robots.txt")
     assert response.status_code == 200
-    assert "Disallow: /" in response.text
+    assert "Disallow: /api/" in response.text
+    assert "Disallow: /\n" not in response.text
 
 
 def test_healthz(client):
