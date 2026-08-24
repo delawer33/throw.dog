@@ -32,7 +32,26 @@
 	}
 }
 
-# Аналитика (self-hosted Umami) в промежуточном режиме НЕ обслуживается:
-# она едет вместе с доменом. Блок аналитики живёт только в боевом Caddyfile
-# (Origin CA за Cloudflare). Здесь его сознательно нет, чтобы app-only деплой
-# на sslip.io не требовал ANALYTICS_DOMAIN и не поднимал Umami.
+# Аналитика (self-hosted Umami) на поддомене, сертификат по ACME (HTTP-01).
+# ВНИМАНИЕ: этот блок требует, чтобы ANALYTICS_DOMAIN был задан в .env — иначе
+# Caddy не стартует. Он заполняется только когда поднимают профиль `analytics`
+# (docker compose --profile analytics up -d). Сам контейнер umami — за профилем;
+# пока он не поднят, поддомен отдаёт 502, что безопасно.
+{$ANALYTICS_DOMAIN} {
+	encode zstd gzip
+
+	log {
+		output stdout
+		format console
+	}
+
+	reverse_proxy umami:3000 {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 30s
+			read_timeout 60s
+			write_timeout 60s
+		}
+		header_up X-Real-IP {remote_host}
+	}
+}
