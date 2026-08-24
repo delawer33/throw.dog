@@ -68,6 +68,16 @@ _MAX_EMAIL_LEN = 254
 #: bytes we read so the endpoint can't be used to buffer a flood.
 _PRO_BODY_MAX_BYTES = 4096
 
+#: Where free-form user feedback (the wish box in the Pro panel) is appended.
+#: Same posture as the emails: docker-volume file, one line per record.
+DEFAULT_FEEDBACK_PATH = "/data/feedback.txt"
+
+#: The most feedback text we keep, in characters (the page enforces the same
+#: cap via ``maxlength``), and the raw-body ceiling around it (UTF-8 + JSON
+#: escaping can inflate 2000 chars several-fold).
+_FEEDBACK_MAX_CHARS = 2000
+_FEEDBACK_BODY_MAX_BYTES = 32768
+
 #: Default header carrying the real client IP when we sit behind a trusted
 #: proxy. Cloudflare's ``CF-Connecting-IP`` is always consulted first.
 DEFAULT_FORWARDED_HEADER = "X-Forwarded-For"
@@ -117,6 +127,8 @@ class Settings:
     forwarded_header: str = DEFAULT_FORWARDED_HEADER
     #: File the Pro fake-door appends interested emails to (one per line).
     pro_emails_path: str = DEFAULT_PRO_EMAILS_PATH
+    #: File the feedback wish-box appends to (one line per record).
+    feedback_path: str = DEFAULT_FEEDBACK_PATH
     #: Key for the log-pseudonym HMAC. Defaults to a per-process random value
     #: (see ``_DEFAULT_LOG_HMAC_SECRET``); set ``THROW_LOG_HMAC_SECRET`` to pin
     #: it for stable cross-restart correlation.
@@ -152,6 +164,7 @@ class Settings:
             trusted_proxy=_env_bool(source.get("THROW_TRUSTED_PROXY"), default=False),
             forwarded_header=source.get("THROW_FORWARDED_HEADER", DEFAULT_FORWARDED_HEADER),
             pro_emails_path=source.get("THROW_PRO_EMAILS_PATH", DEFAULT_PRO_EMAILS_PATH),
+            feedback_path=source.get("THROW_FEEDBACK_PATH", DEFAULT_FEEDBACK_PATH),
             log_hmac_secret=(
                 secret.encode("utf-8") if secret else _DEFAULT_LOG_HMAC_SECRET
             ),
@@ -192,6 +205,36 @@ def append_pro_email(path: str, email: str) -> None:
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with target.open("a", encoding="utf-8") as handle:
         handle.write(f"{ts}\t{email}\n")
+
+
+def normalize_feedback(raw: object) -> str | None:
+    """Trim a feedback text; None when it is not a usable string.
+
+    Free-form by design — the only rules are "non-empty after trimming" and the
+    character cap, which mirrors the page's ``maxlength``.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text or len(text) > _FEEDBACK_MAX_CHARS:
+        return None
+    return text
+
+
+def append_feedback(path: str, text: str) -> None:
+    """Append one feedback record to ``path`` as a single escaped line.
+
+    Newlines/tabs/backslashes in the text are escaped so every record stays one
+    ``ts<TAB>text`` line and the file remains trivially greppable. Like the Pro
+    emails, the text goes to this file and nowhere else — never to stdout or
+    the access log.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    flat = text.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(f"{ts}\t{flat}\n")
 
 
 def _env_bool(value: str | None, *, default: bool) -> bool:
@@ -243,7 +286,7 @@ _active_log_hmac_secret = _DEFAULT_LOG_HMAC_SECRET
 #: is a receiver code (``/red-fox``) or a read (``/api/throws/red-fox``) and
 #: must be pseudonymised before it reaches the access log.
 _SAFE_LOG_PATHS = frozenset(
-    {"/", "/healthz", "/robots.txt", "/api/throws", "/api/pro-interest"}
+    {"/", "/healthz", "/robots.txt", "/api/throws", "/api/pro-interest", "/api/feedback"}
 )
 
 
@@ -511,6 +554,34 @@ def create_app(
                 {"detail": "could not record interest, try again"}, status_code=503
             )
         log_event("pro_email", "-")
+        return JSONResponse({"ok": True}, status_code=201)
+
+    @app.post("/api/feedback")
+    async def feedback(request: Request) -> JSONResponse:
+        # Free-form wish box (Pro panel). Same privacy posture as the emails:
+        # the text arrives in the POST body, is appended to the volume-backed
+        # file, and never reaches stdout or the access log.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > _FEEDBACK_BODY_MAX_BYTES:
+                return JSONResponse({"detail": "request too large"}, status_code=413)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return JSONResponse({"detail": "malformed request"}, status_code=400)
+        text = normalize_feedback(
+            payload.get("text") if isinstance(payload, dict) else None
+        )
+        if text is None:
+            return JSONResponse({"detail": "invalid feedback"}, status_code=400)
+        try:
+            append_feedback(config.feedback_path, text)
+        except OSError:
+            return JSONResponse(
+                {"detail": "could not record feedback, try again"}, status_code=503
+            )
+        log_event("feedback", "-")
         return JSONResponse({"ok": True}, status_code=201)
 
     @app.get("/", response_class=HTMLResponse)
