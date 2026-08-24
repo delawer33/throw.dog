@@ -35,8 +35,16 @@ _STYLE: Final = """
     padding: 32px 20px 72px; line-height: 1.5;
   }
   .wrap { max-width: 660px; margin: 0 auto; }
-  .top { display: flex; align-items: center; gap: 12px; margin-bottom: 30px; }
+  .top { display: flex; align-items: center; margin-bottom: 30px; }
   .top b { font-size: 24px; font-weight: 900; letter-spacing: -.5px; }
+  /* The logo is a home link but reads as a mark, not a hyperlink: no
+     underline, not selectable, not draggable. */
+  .toplink {
+    display: flex; align-items: center; gap: 12px; color: inherit;
+    text-decoration: none; cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  .toplink svg { -webkit-user-drag: none; }
   .paw { transform: rotate(-8deg); flex: none; }
   h1 {
     font-size: clamp(30px, 6vw, 46px); font-weight: 900; line-height: 1.06;
@@ -340,7 +348,7 @@ function qrSVG(text){
 
 _SENDER_TMPL: Final = _HEAD + """<body>
 <div class="wrap">
-  <div class="top">""" + _PAW + """<b>throw.dog</b></div>
+  <div class="top"><a class="toplink" href="/" aria-label="throw.dog home">""" + _PAW + """<b>throw.dog</b></a></div>
 
   <h1><span>@@taglineA@@</span> <span class="hl">@@taglineB@@</span></h1>
   <p class="sub">@@sub@@</p>
@@ -610,7 +618,7 @@ var T = @@__T__@@;
 
 _RECEIVER_TMPL: Final = _HEAD + """<body>
 <div class="wrap">
-  <div class="top">""" + _PAW + """<b>throw.dog</b></div>
+  <div class="top"><a class="toplink" href="/" aria-label="throw.dog home">""" + _PAW + """<b>throw.dog</b></a></div>
 
   <div class="stage">
     """ + _DOG + """
@@ -889,7 +897,7 @@ def _legal_page(h1_html: str, body_html: str) -> str:
     head = _HEAD.replace("@@lang@@", DEFAULT_LOCALE)
     return head + f"""<body>
 <div class="wrap">
-  <div class="top">{_PAW}<b>throw.dog</b></div>
+  <div class="top"><a class="toplink" href="/" aria-label="throw.dog home">{_PAW}<b>throw.dog</b></a></div>
 
   <h1>{h1_html}</h1>
 
