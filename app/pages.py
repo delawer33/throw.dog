@@ -259,16 +259,40 @@ _ANALYTICS_SNIPPET: Final = (
     else "<script>function tdTrack(n){}</script>\n"
 )
 
+#: Inline favicon (a bone), so the /{code} catch-all never sees /favicon.ico
+#: noise and the tab still gets an icon at zero extra requests.
+_FAVICON: Final = (
+    '<link rel="icon" href="data:image/svg+xml,'
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+    "<text y='.9em' font-size='90'>🦴</text></svg>\">"
+)
+
 _HEAD: Final = """<!doctype html>
 <html lang="@@lang@@">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
+@@headMeta@@
 <title>throw.dog</title>
+%s
 <style>%s</style>
 %s</head>
-""" % (_STYLE, _ANALYTICS_SNIPPET)
+""" % (_FAVICON, _STYLE, _ANALYTICS_SNIPPET)
+
+#: Head block for the indexable sender page: description + canonical + link
+#: previews (OG/Twitter). The @@metaDescription@@ token is localised via
+#: STRINGS like every other string.
+_SENDER_HEAD_META: Final = """<meta name="description" content="@@metaDescription@@">
+<link rel="canonical" href="https://throw.dog/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://throw.dog/">
+<meta property="og:title" content="throw.dog — @@taglineA@@ @@taglineB@@">
+<meta property="og:description" content="@@metaDescription@@">
+<meta name="twitter:card" content="summary">"""
+
+#: Receiver pages stay out of every index: the URL is a one-time secret and the
+#: page is meaningless to a crawler.
+_NOINDEX_META: Final = '<meta name="robots" content="noindex, nofollow">'
 
 # Minimal QR generator (byte mode, EC level L, versions 1-4, best mask). Output
 # is verified module-for-module against the reference `qrcode` encoder. Only the
@@ -734,6 +758,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proThanks": "thanks, you'll be first to know",
         "proBadEmail": "That doesn't look like an email.",
         "proNet": "Network problem. Try again.",
+        "metaDescription": "Move text between devices in seconds: paste it, get two words and a QR, open on the other device. No accounts, no cookies, nothing stored — gone in 10 minutes.",
         "getLabel": "Got a code? Fetch it here:",
         "getPlaceholder": "two words: basted lily (or basted-lily — both work)",
         "getBtn": "fetch",
@@ -777,6 +802,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proThanks": "спасибо, сообщим первыми",
         "proBadEmail": "Это не похоже на имейл.",
         "proNet": "Проблема сети. Попробуй ещё раз.",
+        "metaDescription": "Перекинь текст между устройствами за секунды: вставь, получи два слова и QR, открой на другом устройстве. Без аккаунтов и куки, ничего не хранится — исчезает через 10 минут.",
         "getLabel": "Есть код? Забери здесь:",
         "getPlaceholder": "два слова: basted lily (или basted-lily — как угодно)",
         "getBtn": "принести",
@@ -826,10 +852,16 @@ def pick_locale(accept_language: str | None) -> str:
     return best_lang
 
 
-def _render(template: str, lang: str) -> str:
-    """Fill a page template's ``@@key@@`` tokens and ``var T`` blob for ``lang``."""
+def _render(template: str, lang: str, head_meta: str = "") -> str:
+    """Fill a page template's ``@@key@@`` tokens and ``var T`` blob for ``lang``.
+
+    ``head_meta`` fills the shell's ``@@headMeta@@`` slot — SEO/preview tags on
+    the indexable sender page, ``noindex`` on receiver pages — and may itself
+    carry ``@@key@@`` tokens (it is substituted before the string pass).
+    """
     strings = STRINGS[lang]
-    out = template.replace("@@__T__@@", json.dumps(strings, ensure_ascii=False))
+    out = template.replace("@@headMeta@@", head_meta)
+    out = out.replace("@@__T__@@", json.dumps(strings, ensure_ascii=False))
     out = out.replace("@@lang@@", lang)
     for key, value in strings.items():
         out = out.replace(f"@@{key}@@", value)
@@ -837,11 +869,11 @@ def _render(template: str, lang: str) -> str:
 
 
 def render_sender(lang: str = DEFAULT_LOCALE) -> str:
-    return _render(_SENDER_TMPL, lang)
+    return _render(_SENDER_TMPL, lang, head_meta=_SENDER_HEAD_META)
 
 
 def render_receiver(lang: str = DEFAULT_LOCALE) -> str:
-    return _render(_RECEIVER_TMPL, lang)
+    return _render(_RECEIVER_TMPL, lang, head_meta=_NOINDEX_META)
 
 
 def sender_page(accept_language: str | None = None) -> str:
@@ -858,7 +890,9 @@ def receiver_page(accept_language: str | None = None) -> str:
 SENDER_PAGE: Final = render_sender(DEFAULT_LOCALE)
 RECEIVER_PAGE: Final = render_receiver(DEFAULT_LOCALE)
 
-ROBOTS_TXT: Final = "User-agent: *\nDisallow: /\n"
+# The API is banned outright; code pages carry their own noindex (crawlers
+# only ever see one if a human published the link). The rest is public.
+ROBOTS_TXT: Final = "User-agent: *\nDisallow: /api/\n"
 
 
 # --- legal pages (Terms / Privacy) ------------------------------------------
@@ -888,13 +922,18 @@ ROBOTS_TXT: Final = "User-agent: *\nDisallow: /\n"
 _ABUSE_EMAIL: Final = "abuse@throw.dog"
 
 
-def _legal_page(h1_html: str, body_html: str) -> str:
+def _legal_page(h1_html: str, body_html: str, slug: str, description: str) -> str:
     """Wrap static EN legal copy in the shared sticker-punk shell.
 
     ``_HEAD`` still carries the ``@@lang@@`` token (it is shared with the
     localised templates); legal pages are English, so we fill it with ``en``.
+    Legal pages are indexable — a public product should show its terms.
     """
-    head = _HEAD.replace("@@lang@@", DEFAULT_LOCALE)
+    meta = (
+        f'<meta name="description" content="{description}">\n'
+        f'<link rel="canonical" href="https://throw.dog/{slug}">'
+    )
+    head = _HEAD.replace("@@lang@@", DEFAULT_LOCALE).replace("@@headMeta@@", meta)
     return head + f"""<body>
 <div class="wrap">
   <div class="top"><a class="toplink" href="/" aria-label="throw.dog home">{_PAW}<b>throw.dog</b></a></div>
@@ -967,5 +1006,15 @@ _PRIVACY_BODY: Final = f"""    <h2>The short version</h2>
     <a class="abuse" href="mailto:{_ABUSE_EMAIL}">{_ABUSE_EMAIL}</a>.</p>"""
 
 
-TERMS_PAGE: Final = _legal_page('Terms of <span class="hl">Service</span>', _TERMS_BODY)
-PRIVACY_PAGE: Final = _legal_page('Privacy <span class="hl">Policy</span>', _PRIVACY_BODY)
+TERMS_PAGE: Final = _legal_page(
+    'Terms of <span class="hl">Service</span>',
+    _TERMS_BODY,
+    "terms",
+    "Terms of service for throw.dog — ephemeral one-time text transfer.",
+)
+PRIVACY_PAGE: Final = _legal_page(
+    'Privacy <span class="hl">Policy</span>',
+    _PRIVACY_BODY,
+    "privacy",
+    "Privacy policy for throw.dog: no accounts, no cookies, nothing stored.",
+)

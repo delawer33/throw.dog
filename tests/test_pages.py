@@ -5,6 +5,8 @@ Speed is a design rule (``model/08-design.md``): each document must weigh under
 whole.
 """
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -53,16 +55,25 @@ def test_pages_make_no_external_requests_except_own_analytics():
     # third-party CDN — it is self-hosted on the same VPS — so we relax the
     # slice-8 "zero external requests" rule to permit that one script src and
     # nothing else. The SVG xmlns is a namespace identifier, not a fetched URL.
+    # Also NOT external requests: the data-URI favicon (inline), the canonical
+    # link and og:url (metadata pointing at ourselves — browsers fetch nothing),
+    # and SVG xmlns namespace identifiers in either quote style.
     allowed_src = "https://" + ANALYTICS_HOST + "/script.js"
     for page in (SENDER_PAGE, RECEIVER_PAGE):
         body = page.replace('xmlns="http://www.w3.org/2000/svg"', "")
+        body = body.replace("xmlns='http://www.w3.org/2000/svg'", "")
         # Strip the single permitted analytics script URL before auditing.
         body = body.replace(allowed_src, "")
+        # Self-referential metadata URLs (canonical / og:url / og:title).
+        body = body.replace("https://throw.dog", "")
         assert "http://" not in body
         assert "https://" not in body
         # Third-party CDNs / font hosts / stylesheets stay forbidden outright.
-        for needle in ("@import", "cdn", "googleapis", "<link"):
+        for needle in ("@import", "cdn", "googleapis"):
             assert needle not in page.lower()
+        # <link> tags: only the inline data-URI icon and the self-canonical.
+        for match in re.findall(r"<link[^>]*>", page, flags=re.IGNORECASE):
+            assert 'href="data:' in match or 'href="https://throw.dog' in match
         # The only external script is the analytics one: exactly one src=.
         assert page.lower().count("src=") == 1
 
@@ -189,12 +200,29 @@ def test_privacy_page_serves_and_mentions_ephemerality_and_abuse(client):
     assert "abuse@throw.dog" in body
 
 
-def test_legal_pages_carry_noindex(client):
-    # Same noindex handling as every page: meta tag in the shell + response header.
+def test_legal_pages_are_indexable_with_seo_meta(client):
+    # Public launch: legal pages carry description + canonical and no noindex.
     for path in ("/terms", "/privacy"):
         response = client.get(path)
-        assert 'name="robots" content="noindex, nofollow"' in response.text
-        assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+        assert "noindex" not in response.text
+        assert "X-Robots-Tag" not in response.headers
+        assert 'name="description"' in response.text
+        assert f'rel="canonical" href="https://throw.dog{path}"' in response.text
+
+
+def test_sender_page_is_indexable_with_previews(client):
+    response = client.get("/")
+    assert "noindex" not in response.text
+    assert "X-Robots-Tag" not in response.headers
+    assert 'name="description"' in response.text
+    assert 'property="og:title"' in response.text
+    assert 'rel="canonical" href="https://throw.dog/"' in response.text
+
+
+def test_receiver_page_stays_noindex(client):
+    response = client.get("/some-code")
+    assert 'name="robots" content="noindex, nofollow"' in response.text
+    assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
 
 
 def test_legal_pages_are_english_only(client):

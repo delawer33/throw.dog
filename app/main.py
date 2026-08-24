@@ -433,10 +433,16 @@ def create_app(
     app.state.store = throws
     app.state.gatekeeper = gate
 
+    # Public launch: the homepage and legal pages ARE indexable; everything
+    # else — receiver /{code} pages (one-time secrets) and the API — stays out
+    # of every index via the header (code pages also carry a <meta robots>).
+    indexable_paths = {"/", "/terms", "/privacy", "/robots.txt"}
+
     @app.middleware("http")
     async def no_index(request: Request, call_next):
         response = await call_next(request)
-        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        if request.url.path not in indexable_paths:
+            response.headers["X-Robots-Tag"] = "noindex, nofollow"
         return response
 
     async def miss(*, tarpitted: bool = False) -> JSONResponse:
