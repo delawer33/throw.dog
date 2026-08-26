@@ -1,6 +1,11 @@
+import base64
+
 import pytest
 from fastapi.testclient import TestClient
 
+from app.closedaddress import generate as generate_address
+from app.closedaddress import is_closed_address
+from app.codewords import normalize
 from app.gatekeeper import Gatekeeper
 from app.main import Settings, code_pseudonym, create_app, sanitize_log_path
 
@@ -506,3 +511,201 @@ def test_a_full_store_answers_busy_rather_than_failing(client):
 
     assert response.status_code == 503
     assert "busy" in response.json()["detail"]
+
+
+# --- closed (end-to-end encrypted) throws -----------------------------------
+#
+# The server's whole part in the closed mode is to carry two extra facts: that a
+# text is ciphertext, and an address that could not be a two-word code. It never
+# decrypts, and it never sees a key — the key rides in the fragment of the link,
+# which browsers do not send.
+
+ENC = "aes-gcm-v1"
+
+#: What the sender's browser actually produces for a plaintext of ``n`` bytes:
+#: base64 of a 12-byte IV, the ciphertext, and AES-GCM's 16-byte tag. Written
+#: out here rather than imported, so the test states the shape independently of
+#: whatever the server computes.
+def browser_payload_size(plaintext_bytes: int) -> int:
+    binary = 12 + plaintext_bytes + 16
+    return 4 * ((binary + 2) // 3)
+
+
+#: What that browser sends on the wire: base64 of that many bytes. Real base64,
+#: because the server measures a closed throw by decoding it — a run of ``x``
+#: characters is not something any browser could have produced.
+def browser_payload(plaintext_bytes: int) -> str:
+    payload = base64.b64encode(b"\0" * (12 + plaintext_bytes + 16)).decode()
+    assert len(payload) == browser_payload_size(plaintext_bytes)
+    return payload
+
+
+def throw_closed(client, text: str) -> str:
+    response = client.post("/api/throws", json={"text": text, "enc": ENC})
+    assert response.status_code == 201, response.text
+    return response.json()["code"]
+
+
+def test_a_closed_throw_crosses_over_still_marked_as_ciphertext(client):
+    address = throw_closed(client, "bm90IHBsYWludGV4dA==")
+
+    response = client.post(f"/api/throws/{address}")
+    assert response.status_code == 200
+    assert response.json() == {"text": "bm90IHBsYWludGV4dA==", "enc": ENC}
+
+
+def test_a_closed_throw_dies_after_one_read_like_any_other(client):
+    address = throw_closed(client, "Y2lwaGVy")
+    assert client.post(f"/api/throws/{address}").status_code == 200
+    assert client.post(f"/api/throws/{address}").status_code == 404
+
+
+def test_a_closed_throw_is_addressed_by_an_address_never_by_words(client):
+    address = throw_closed(client, "Y2lwaGVy")
+    assert is_closed_address(address)
+    assert normalize(address) is None
+
+
+def test_an_open_throw_still_answers_without_any_mode_field(client):
+    # Nothing about the open path changes shape: an old client sees exactly the
+    # response it saw before closed throws existed.
+    code = throw(client, "plain as day")
+    assert client.post(f"/api/throws/{code}").json() == {"text": "plain as day"}
+
+
+def test_a_closed_address_is_forgiven_nothing(client):
+    # A code is retyped by hand, so case and separators are equivalent. An
+    # address is never typed, so it is matched exactly — being lenient could
+    # only blur the line between the two spaces.
+    address = throw_closed(client, "Y2lwaGVy")
+    assert client.post(f"/api/throws/{address.upper()}").status_code == 404
+    assert client.post(f"/api/throws/{address}").status_code == 200
+
+
+def test_an_unknown_encryption_scheme_is_refused(client):
+    # We carry a version, not a free-form label: an unknown one means the
+    # sender and this server disagree about the format, and guessing would
+    # produce a throw nobody can read.
+    for bad in ("aes-gcm-v2", "", "rot13", 1, True, {}):
+        response = client.post("/api/throws", json={"text": "Y2lwaGVy", "enc": bad})
+        assert response.status_code == 400, bad
+
+
+def test_a_null_enc_is_simply_an_open_throw(client):
+    # JSON's way of saying "no mode field" from a client that always sends the
+    # key: treated as absent, not as an unknown scheme.
+    response = client.post("/api/throws", json={"text": "plain", "enc": None})
+    assert response.status_code == 201
+    assert normalize(response.json()["code"]) is not None
+
+
+def test_the_visible_size_limit_is_the_same_in_both_modes(client):
+    # A closed throw arrives base64-encoded, a third larger than the text the
+    # human pasted. That is our arithmetic, not theirs: the *visible* limit must
+    # be identical, so nobody learns about base64 from an error message.
+    limit = 65536
+    assert client.post("/api/throws", json={"text": "x" * limit}).status_code == 201
+
+    at_the_limit = client.post(
+        "/api/throws",
+        json={"text": browser_payload(limit), "enc": ENC},
+    )
+    assert at_the_limit.status_code == 201, "a full-size closed throw must fit"
+
+
+def test_an_oversized_closed_throw_is_still_refused(client):
+    response = client.post(
+        "/api/throws",
+        json={"text": browser_payload(65537), "enc": ENC},
+    )
+    assert response.status_code == 413
+    assert "65536" in response.json()["detail"], "the message names the visible limit"
+
+
+def test_an_oversized_open_throw_is_not_helped_by_the_closed_headroom(client):
+    # The headroom exists for base64 expansion, not as a bigger limit for
+    # anyone who omits the flag.
+    response = client.post("/api/throws", json={"text": "x" * 70_000})
+    assert response.status_code == 413
+
+
+def test_the_receiver_page_is_served_for_a_closed_address(client):
+    address = throw_closed(client, "Y2lwaGVy")
+    page = client.get(f"/{address}")
+    assert page.status_code == 200
+    assert "<!doctype html>" in page.text.lower()
+    # Fetching the page must not consume the throw: only the POST does.
+    assert client.post(f"/api/throws/{address}").status_code == 200
+
+
+def test_a_miss_on_a_closed_address_looks_like_every_other_miss(client):
+
+    never_existed = client.post(f"/api/throws/{generate_address()}")
+    not_a_code = client.post("/api/throws/wibble-wobble")
+    assert never_existed.status_code == 404
+    assert never_existed.text == not_a_code.text
+
+
+def test_guessing_closed_addresses_does_not_spend_an_honest_readers_budget():
+    # Closed addresses cannot be enumerated (68 bits, and never typed), so a
+    # miss on one is not evidence of code-guessing. Charging it to the per-IP
+    # budget would let a flood of nonsense addresses tarpit the honest reader
+    # who shares that NAT — the exact person the budget exists to protect.
+
+    gate = Gatekeeper(window_seconds=60.0, miss_budget=3, clock=lambda: 1000.0)
+    app = create_app(TEST_SETTINGS, gatekeeper=gate)
+    client = TestClient(app)
+
+    for _ in range(30):
+        assert client.post(f"/api/throws/{generate_address()}").status_code == 404
+
+    assert gate.allow("testclient"), "closed-address misses must not spend the budget"
+
+    # A real code guess still counts, and still runs out.
+    for _ in range(4):
+        client.post("/api/throws/zesty-walrus")
+    assert not gate.allow("testclient")
+
+
+def test_a_closed_address_never_reaches_a_log_in_the_clear(client, capsys):
+    address = throw_closed(client, "Y2lwaGVy")
+    client.post(f"/api/throws/{address}")
+    captured = capsys.readouterr().out
+
+    assert address not in captured
+    assert code_pseudonym(address) in captured
+    assert sanitize_log_path(f"/api/throws/{address}") == (
+        "/api/throws/" + code_pseudonym(address)
+    )
+    assert address not in sanitize_log_path(f"/{address}")
+
+
+def test_the_event_log_records_the_mode_but_nothing_about_the_content(client, capsys):
+    # The operator needs the share of closed throws; that is a fact about the
+    # throw, not about what was in it.
+    open_code = throw(client, "plain")
+    closed_address = throw_closed(client, "Y2lwaGVy")
+    client.post(f"/api/throws/{open_code}")
+    client.post(f"/api/throws/{closed_address}")
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+
+    created = [line for line in lines if line.startswith("event=created")]
+    read = [line for line in lines if line.startswith("event=read")]
+    assert any("mode=open" in line for line in created)
+    assert any("mode=closed" in line for line in created)
+    assert any("mode=open" in line for line in read)
+    assert any("mode=closed" in line for line in read)
+    for line in lines:
+        assert "plain" not in line
+        assert "Y2lwaGVy" not in line
+
+
+def test_the_closed_sender_page_is_served_on_its_own_address(client):
+    # Its own page, not a redraw of the homepage: the homepage has loaded a
+    # script from the network, and a loaded script cannot be unloaded from a tab
+    # where a key is about to exist.
+    response = client.get("/closed")
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text.lower()
+    # It must not be mistaken for a throw address.
+    assert not is_closed_address("closed")

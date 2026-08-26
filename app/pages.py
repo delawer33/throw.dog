@@ -1,4 +1,4 @@
-"""The two HTML pages, inlined.
+"""The HTML pages, inlined.
 
 No framework, no build step, no external requests — the whole point is that a
 phone on a bad connection gets one small document and can act on it. The design
@@ -10,6 +10,18 @@ is inline, so a page is one self-contained document well under 100 KB.
 The receiver page is identical for every code: it carries no throw content and
 fetches it with a POST. Link previews and prefetchers issue GETs, and a GET
 must never burn a one-shot throw.
+
+Three pages, not two, and the split is a promise rather than a layout choice
+(ADR 0003). A closed throw is encrypted in the sender's browser and decrypted in
+the receiver's, so on those two pages a key exists in the tab, alongside the
+plaintext it protects. Nothing loaded over the network runs there: not because a
+loaded script is known to misbehave, but because "the server never sees your
+text" cannot be true of a page whose code the server ships on demand. Hence the
+closed sender lives at its own address instead of being a redraw of the
+homepage — a script already fetched into a tab cannot be unfetched.
+
+Browser analytics therefore survives only on the open sender page, where no key
+is ever born.
 """
 
 from __future__ import annotations
@@ -17,6 +29,8 @@ from __future__ import annotations
 import json
 import os
 from typing import Final
+
+from app.closedaddress import JS_PATTERN as CLOSED_ADDRESS_PATTERN
 
 # Sticker-punk palette and building blocks. No `%` in the template that wraps
 # this (only in _STYLE's own values, which are the format *argument*), so CSS
@@ -198,6 +212,23 @@ _STYLE: Final = """
     text-decoration: none; transform: rotate(-1deg);
   }
 
+  /* Mode of the throw: two halves, the current one filled in. Both carry
+     their own line, so the choice is made on what each mode actually does. */
+  .modes { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  .mode {
+    flex: 1 1 200px; text-align: left; font-family: inherit; cursor: pointer;
+    background: #fff; color: var(--ink); border: 3px solid var(--ink);
+    border-radius: 12px; box-shadow: 4px 4px 0 var(--ink); padding: 10px 14px;
+  }
+  .mode.on { background: var(--mustard); cursor: default; }
+  .mode[disabled] { opacity: .55; cursor: not-allowed; box-shadow: none; }
+  .modename { display: block; font-weight: 900; font-size: 15px; }
+  .modenote { display: block; font-weight: 600; font-size: 12.5px; opacity: .75; margin-top: 3px; }
+
+  /* Closed mode delivers by QR or not at all, so the QR is the result, not a
+     garnish beside a code that does not exist. */
+  .qr.big { width: min(230px, 62vw); height: min(230px, 62vw); margin-bottom: 14px; }
+
   @media (prefers-reduced-motion: reduce) {
     .bone, .dog, .stage.thrown #done, .btn { animation: none !important; transition: none !important; }
     .stage.thrown .bone { opacity: 0; }
@@ -267,7 +298,7 @@ _FAVICON: Final = (
     "<text y='.9em' font-size='90'>🦴</text></svg>\">"
 )
 
-_HEAD: Final = """<!doctype html>
+_HEAD_TMPL: Final = """<!doctype html>
 <html lang="@@lang@@">
 <head>
 <meta charset="utf-8">
@@ -277,7 +308,32 @@ _HEAD: Final = """<!doctype html>
 %s
 <style>%s</style>
 %s</head>
-""" % (_FAVICON, _STYLE, _ANALYTICS_SNIPPET)
+"""
+
+
+def _head(*, analytics: bool) -> str:
+    """The shared shell, with or without the tracker.
+
+    ``analytics=False`` is not a configuration switch — it is the trust
+    boundary of ADR 0003 expressed in code. A page that holds a key holds it
+    next to whatever else runs in that tab, and stripping the fragment out of
+    the URL would not help: the decrypted text sits in the DOM either way. So
+    the key-bearing pages get a shell with no network-loaded script at all, and
+    with no ``tdTrack`` defined — which is deliberate, so a funnel call added
+    there by habit fails loudly in review instead of quietly shipping.
+    """
+    return _HEAD_TMPL % (
+        _FAVICON,
+        _STYLE,
+        _ANALYTICS_SNIPPET if analytics else "",
+    )
+
+
+#: For the open sender and the legal pages: no key is ever born on these.
+_HEAD: Final = _head(analytics=True)
+
+#: For the closed sender and every receiver page.
+_HEAD_NO_SCRIPT: Final = _head(analytics=False)
 
 #: Head block for the indexable sender page: description + canonical + link
 #: previews (OG/Twitter). The @@metaDescription@@ token is localised via
@@ -370,12 +426,341 @@ function qrSVG(text){
 }
 """
 
+# The closed mode's crypto, kept as one block on purpose. Everything here is
+# standalone — no DOM, no page state, no strings — so the round-trip can be run
+# outside a browser (node exposes the same WebCrypto, btoa/atob, TextEncoder)
+# and a test can prove that what tdEncrypt writes, tdDecrypt reads back.
+#
+# AES-256-GCM. The key is 32 random bytes, the IV 12, and what goes to the
+# server is base64 of ``iv || ciphertext || tag``. The key is base64url without
+# padding, because its only home is the fragment of a URL.
+#
+# GCM is authenticated: a wrong key does not produce garbage, it fails. That is
+# what lets the receiver say "this key did not fit" instead of showing rubbish.
+_CRYPTO_CHECK_JS: Final = """
+function tdCryptoReady(){
+  try { return !!(window.crypto && window.crypto.subtle && window.crypto.getRandomValues
+    && window.isSecureContext); } catch (e) { return false; }
+}
+"""
+
+_CRYPTO_JS: Final = _CRYPTO_CHECK_JS + """
+var TD_ENC = 'aes-gcm-v1';
+var TD_IV_BYTES = 12, TD_KEY_BYTES = 32;
+
+function tdB64(bytes){
+  var s = '';
+  for (var i = 0; i < bytes.length; i++) { s += String.fromCharCode(bytes[i]); }
+  return btoa(s);
+}
+function tdUnB64(str){
+  var s = atob(str), bytes = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) { bytes[i] = s.charCodeAt(i); }
+  return bytes;
+}
+function tdB64Url(bytes){
+  return tdB64(bytes).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+}
+function tdUnB64Url(str){
+  return tdUnB64(str.replace(/-/g, '+').replace(/_/g, '/'));
+}
+function tdNewKey(){
+  return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true,
+    ['encrypt', 'decrypt']);
+}
+function tdExportKey(key){
+  return crypto.subtle.exportKey('raw', key).then(function (raw) {
+    return tdB64Url(new Uint8Array(raw));
+  });
+}
+function tdImportKey(str){
+  try {
+    var raw = tdUnB64Url(str);
+    if (raw.length !== TD_KEY_BYTES) { return Promise.reject(new Error('key length')); }
+    return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt']);
+  } catch (e) { return Promise.reject(e); }
+}
+function tdEncrypt(key, text){
+  var iv = crypto.getRandomValues(new Uint8Array(TD_IV_BYTES));
+  var data = new TextEncoder().encode(text);
+  return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, data)
+    .then(function (buffer) {
+      var body = new Uint8Array(buffer), out = new Uint8Array(iv.length + body.length);
+      out.set(iv, 0);
+      out.set(body, iv.length);
+      return tdB64(out);
+    });
+}
+function tdDecrypt(key, payload){
+  try {
+    var all = tdUnB64(payload);
+    if (all.length <= TD_IV_BYTES) { return Promise.reject(new Error('too short')); }
+    return crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: all.slice(0, TD_IV_BYTES) }, key, all.slice(TD_IV_BYTES)
+    ).then(function (buffer) { return new TextDecoder().decode(buffer); });
+  } catch (e) { return Promise.reject(e); }
+}
+"""
+
+
+
+_TOP: Final = (
+    '<div class="top"><a class="toplink" href="/" aria-label="throw.dog home">'
+    + _PAW
+    + "<b>throw.dog</b></a></div>"
+)
+
+_FOOTER: Final = """  <footer class="foot">
+    <a href="/terms">@@footerTerms@@</a>
+    <span aria-hidden="true">·</span>
+    <a href="/privacy">@@footerPrivacy@@</a>
+  </footer>"""
+
+
+def _mode_row(*, closed: bool) -> str:
+    """The mode of the throw: two halves, the current one filled in.
+
+    Both halves always carry their own line, so the choice is made on what each
+    mode actually does — "the server sees your text and a code works" against
+    "the server sees only ciphertext and only a link or QR works" — rather than
+    on which name sounds safer. The current mode stays on screen afterwards
+    too: the choice is remembered per device, and a remembered choice that
+    acted silently would be worst exactly where it matters, on a shared
+    machine.
+    """
+
+    def half(name: str, note: str, *, current: bool) -> str:
+        if current:
+            return (
+                '  <div class="mode on">\n'
+                f'    <span class="modename">{name}</span>\n'
+                f'    <span class="modenote">{note}</span>\n'
+                "  </div>"
+            )
+        return (
+            '  <button class="mode" id="switchmode" type="button">\n'
+            f'    <span class="modename">{name}</span>\n'
+            f'    <span class="modenote" id="othernote">{note}</span>\n'
+            "  </button>"
+        )
+
+    return (
+        '<div class="modes" role="group" aria-label="@@modeLabel@@">\n'
+        + half("@@modeOpenName@@", "@@modeOpenNote@@", current=not closed)
+        + "\n"
+        + half("@@modeClosedName@@", "@@modeClosedNote@@", current=closed)
+        + "\n</div>"
+    )
+
+
+#: "Got a code?" — on both sender pages, because a person who prefers the closed
+#: mode still receives throws, and the page they land on first is whichever one
+#: their remembered choice sends them to.
+_GET_CARD: Final = """  <div class="card getcard">
+    <p class="donelabel">@@getLabel@@</p>
+    <div class="getrow">
+      <input class="proinput" id="getcode" type="text" autocapitalize="none"
+             autocomplete="off" spellcheck="false" placeholder="@@getPlaceholder@@">
+      <button class="btn ghost" id="getgo" type="button">@@getBtn@@</button>
+    </div>
+  </div>"""
+
+
+def _get_card_js(*, track: bool) -> str:
+    """Wiring for the "Got a code?" field.
+
+    It accepts three things a person plausibly puts there: two words, a link to
+    an open throw, and a whole closed link. The last one is why this is not a
+    one-line normaliser any more — a closed link's key lives in the fragment,
+    and the old "everything that is not a latin letter becomes a hyphen" rule
+    quietly ground it, plus the address, into a code that could not exist. The
+    reader then saw "nothing here" over a throw that was alive and well.
+
+    ``track`` is False on the closed sender page, which defines no tdTrack at
+    all (ADR 0003).
+    """
+    fetch_link = "    tdTrack('fetch_link');\n" if track else ""
+    fetch_code = "    tdTrack('fetch_code');\n" if track else ""
+    return (
+        r"""
+  var getcode = document.getElementById('getcode');
+  function goGet() {
+    var target = tdClosedTarget(getcode.value);
+    if (target) {
+"""
+        + fetch_link
+        + """      window.location.href = target;
+      return;
+    }
+    var typed = (getcode.value || '').trim().replace(/[?#].*$/, '');
+    var code = typed.split('/').pop().toLowerCase()
+      .replace(/[^a-z]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!code) { getcode.focus(); return; }
+"""
+        + fetch_code
+        + """    window.location.href = '/' + code;
+  }
+  document.getElementById('getgo').addEventListener('click', goGet);
+  getcode.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') { event.preventDefault(); goGet(); }
+  });
+  // A pasted closed link is acted on at once, so the key never rests in this
+  // field. On the open sender that field lives on a page that loads a script
+  // over the network, and a key must not sit there waiting to be submitted.
+  getcode.addEventListener('paste', function (event) {
+    var clipboard = event.clipboardData || window.clipboardData;
+    if (!clipboard) { return; }
+    var target = tdClosedTarget(clipboard.getData('text'));
+    if (!target) { return; }
+    event.preventDefault();
+    window.location.href = target;
+  });
+"""
+    )
+
+
+#: The one rule that decides whether an address needs a key, injected from the
+#: module that owns it so the browser and the server cannot drift apart on it.
+_CLOSED_RE_JS: Final = """
+var CLOSED_RE = /@@__CLOSED_RE__@@/;
+"""
+
+#: Recognising one of our own closed links wherever a person might put it.
+#:
+#: This is a safety net, not a convenience. A closed link carries the key, and
+#: the key is the one thing that must never reach us — so a link pasted where a
+#: text was expected must be opened, never thrown. Whitespace anywhere means the
+#: value is prose that happens to contain a link, and prose is left alone.
+#:
+#: Only the address is lowercased. The key is base64url and case-carrying;
+#: folding it would destroy it.
+_OWN_LINK_JS: Final = r"""
+function tdClosedTarget(value){
+  var raw = (value || '').trim();
+  if (!raw || /\s/.test(raw)) { return null; }
+  var hash = '', at = raw.indexOf('#');
+  if (at >= 0) { hash = raw.slice(at); raw = raw.slice(0, at); }
+  var last = raw.replace(/[?].*$/, '').replace(/\/+$/, '').split('/').pop().toLowerCase();
+  if (!CLOSED_RE.test(last)) { return null; }
+  return '/' + last + hash;
+}
+"""
+
+#: Where the remembered mode and the carried-over draft live. The draft rides in
+#: sessionStorage, never in the URL and never through us: switching mode must
+#: not be a way to hand the server a text the sender meant to encrypt.
+_STORAGE_JS: Final = """
+var TD_MODE_KEY = 'td_mode', TD_DRAFT_KEY = 'td_draft';
+function tdRemember(mode){ try { localStorage.setItem(TD_MODE_KEY, mode); } catch (e) {} }
+function tdKeepDraft(value){ try { sessionStorage.setItem(TD_DRAFT_KEY, value || ''); } catch (e) {} }
+function tdTakeDraft(){
+  try {
+    var draft = sessionStorage.getItem(TD_DRAFT_KEY);
+    if (draft) { sessionStorage.removeItem(TD_DRAFT_KEY); return draft; }
+  } catch (e) {}
+  return '';
+}
+"""
+
+# Both senders compose a throw and then show a card with a link and a QR. What
+# differs between them is one function — how the text becomes a throw — so only
+# that function lives in the templates; the surroundings are shared, which is
+# also what keeps the two from drifting apart on the parts that matter (the
+# closed-link guard below, and reporting a network failure in our own words).
+_COMPOSE_JS: Final = """
+  var text = document.getElementById('text');
+  var error = document.getElementById('error');
+  var compose = document.getElementById('compose');
+  var done = document.getElementById('done');
+  var stage = document.getElementById('stage');
+  var urlEl = document.getElementById('url');
+  var qrEl = document.getElementById('qr');
+  var currentUrl = '';
+  var busy = false;
+
+  function fail(message) {
+    error.textContent = message;
+    error.hidden = false;
+  }
+
+  function throwAnim() {
+    stage.classList.remove('thrown');
+    void stage.offsetWidth;
+    stage.classList.add('thrown');
+  }
+"""
+
+
+def _compose_wiring_js(*, track: bool) -> str:
+    """Wire the compose card up to ``send``, which each sender defines itself.
+
+    ``track`` is false on the closed sender: ADR 0003 keeps analytics off every
+    page where a key exists, so there is nothing there to report a paste to.
+    """
+    paste = "    tdTrack('paste');\n" if track else ""
+    return """
+  text.addEventListener('paste', function (event) {
+    var clipboard = event.clipboardData || window.clipboardData;
+    if (!clipboard) { return; }
+    var pasted = clipboard.getData('text');
+    if (!pasted || !pasted.trim()) { return; }
+    // A closed link of ours is opened, not thrown — see tdClosedTarget. This
+    // has to happen before anything is sent, or the key goes up with the text.
+    var target = tdClosedTarget(pasted);
+    if (target) { event.preventDefault(); window.location.href = target; return; }
+""" + paste + """    event.preventDefault();
+    text.value = pasted;
+    send(pasted);
+  });
+
+  document.getElementById('throw').addEventListener('click', function () {
+    send(text.value);
+  });
+
+  document.getElementById('copyurl').addEventListener('click', function () {
+    var button = document.getElementById('copyurl');
+    function ok() { button.textContent = T.copied; setTimeout(function () { button.textContent = T.copyLink; }, 1500); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(currentUrl).then(ok, function () {});
+    }
+  });
+
+  document.getElementById('again').addEventListener('click', function () {
+    text.value = '';
+    done.hidden = true;
+    compose.hidden = false;
+    error.hidden = true;
+    stage.classList.remove('thrown');
+    text.focus();
+  });
+"""
+
+
 _SENDER_TMPL: Final = _HEAD + """<body>
+<script>
+// The remembered mode, applied before anything is drawn. Pasting throws the
+// text immediately, so the mode cannot be a decision made in the moment — it
+// has to be already settled by the time the textarea exists.
+(function () {
+  try {
+    if (localStorage.getItem('td_mode') === 'closed'
+        && window.crypto && window.crypto.subtle && window.isSecureContext) {
+      // The navigation is queued, not immediate: this document keeps parsing
+      // and its main script would otherwise run and overwrite the very mode we
+      // are honouring. The flag stops it.
+      window.tdLeaving = true;
+      window.location.replace('/closed');
+    }
+  } catch (e) {}
+})();
+</script>
 <div class="wrap">
-  <div class="top"><a class="toplink" href="/" aria-label="throw.dog home">""" + _PAW + """<b>throw.dog</b></a></div>
+  """ + _TOP + """
 
   <h1><span>@@taglineA@@</span> <span class="hl">@@taglineB@@</span></h1>
   <p class="sub">@@sub@@</p>
+
+  """ + _mode_row(closed=False) + """
 
   <div class="stage" id="stage">
     """ + _DOG + _BONE + """
@@ -403,18 +788,11 @@ _SENDER_TMPL: Final = _HEAD + """<body>
     </div>
   </div>
 
-  <div class="card getcard">
-    <p class="donelabel">@@getLabel@@</p>
-    <div class="getrow">
-      <input class="proinput" id="getcode" type="text" autocapitalize="none"
-             autocomplete="off" spellcheck="false" placeholder="@@getPlaceholder@@">
-      <button class="btn ghost" id="getgo" type="button">@@getBtn@@</button>
-    </div>
-  </div>
+""" + _GET_CARD + """
 
   <button class="prochip" id="prochip" type="button" data-ev="pro_click">@@proChip@@</button>
   <button class="prochip" id="fbchip" type="button">@@fbChip@@</button>
-  <span class="chip">@@chip@@</span>
+  <span class="chip">@@chipOpen@@</span>
 
   <div class="card prodoor" id="prodoor" hidden>
     <p class="donelabel">@@proTitle@@</p>
@@ -440,43 +818,46 @@ _SENDER_TMPL: Final = _HEAD + """<body>
     <p id="fbthanks" class="donelabel" hidden></p>
   </div>
 
-  <footer class="foot">
-    <a href="/terms">@@footerTerms@@</a>
-    <span aria-hidden="true">·</span>
-    <a href="/privacy">@@footerPrivacy@@</a>
-  </footer>
+""" + _FOOTER + """
 </div>
 
 <script>
 var T = @@__T__@@;
-""" + _QR_JS + """
-(function () {
-  var text = document.getElementById('text');
-  var error = document.getElementById('error');
-  var compose = document.getElementById('compose');
-  var done = document.getElementById('done');
-  var stage = document.getElementById('stage');
+""" + _QR_JS + _CRYPTO_CHECK_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + """
+(function () {""" + _COMPOSE_JS + """
   var codebig = document.getElementById('codebig');
-  var urlEl = document.getElementById('url');
-  var qrEl = document.getElementById('qr');
-  var currentUrl = '';
-  var busy = false;
 
+  // Leaving for /closed: touch nothing. Writing the remembered mode here would
+  // flip it back to open, and taking the draft would consume it before the
+  // page that needs it has loaded.
+  if (window.tdLeaving) { return; }
+
+  tdRemember('open');
+  text.value = tdTakeDraft();
   text.focus();
 
-  function fail(message) {
-    error.textContent = message;
-    error.hidden = false;
-  }
-
-  function throwAnim() {
-    stage.classList.remove('thrown');
-    void stage.offsetWidth;
-    stage.classList.add('thrown');
+  // Closed mode needs WebCrypto over https. Where it is missing, the half is
+  // shown disabled WITH the reason: a mode that simply vanished would read as
+  // us having lied on the homepage.
+  var switchmode = document.getElementById('switchmode');
+  if (!tdCryptoReady()) {
+    switchmode.disabled = true;
+    document.getElementById('othernote').textContent = T.modeClosedUnavailable;
+  } else {
+    switchmode.addEventListener('click', function () {
+      tdRemember('closed');
+      tdKeepDraft(text.value);
+      window.location.href = '/closed';
+    });
   }
 
   function send(value) {
     if (busy) { return; }
+    // One of our own closed links, wherever it came from: it carries a key, so
+    // it is opened rather than thrown. Sending it would hand us the one thing
+    // the closed mode promises we never receive.
+    var opening = tdClosedTarget(value);
+    if (opening) { window.location.href = opening; return; }
     if (!value || !value.trim()) { fail(T.nothing); return; }
     busy = true;
     error.hidden = true;
@@ -484,6 +865,9 @@ var T = @@__T__@@;
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: value })
+    }).then(null, function () {
+      // The browser's own failure wording is untranslated; ours is not.
+      throw new Error(T.netSend);
     }).then(function (response) {
       if (response.status === 413) { throw new Error(T.tooBig); }
       if (response.status === 400) { throw new Error(T.nothing); }
@@ -505,58 +889,13 @@ var T = @@__T__@@;
     });
   }
 
-  text.addEventListener('paste', function (event) {
-    var clipboard = event.clipboardData || window.clipboardData;
-    if (!clipboard) { return; }
-    var pasted = clipboard.getData('text');
-    if (!pasted || !pasted.trim()) { return; }
-    tdTrack('paste');
-    event.preventDefault();
-    text.value = pasted;
-    send(pasted);
-  });
-
-  document.getElementById('throw').addEventListener('click', function () {
-    send(text.value);
-  });
-
-  document.getElementById('copyurl').addEventListener('click', function () {
-    var button = document.getElementById('copyurl');
-    function ok() { button.textContent = T.copied; setTimeout(function () { button.textContent = T.copyLink; }, 1500); }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(currentUrl).then(ok, function () {});
-    }
-  });
-
-  document.getElementById('again').addEventListener('click', function () {
-    text.value = '';
-    done.hidden = true;
-    compose.hidden = false;
-    error.hidden = true;
-    stage.classList.remove('thrown');
-    text.focus();
-  });
-
-  // Fetch-by-code: the receiver types the two words here instead of editing the
-  // URL. Anything that isn't a latin letter becomes a hyphen, so "devoid crow",
-  // "devoid_crow" and "Devoid-Crow" all land on /devoid-crow.
-  var getcode = document.getElementById('getcode');
-  function goGet() {
-    var code = (getcode.value || '').toLowerCase()
-      .replace(/[^a-z]+/g, '-').replace(/^-+|-+$/g, '');
-    if (!code) { getcode.focus(); return; }
-    tdTrack('fetch_code');
-    window.location.href = '/' + code;
-  }
-  document.getElementById('getgo').addEventListener('click', goGet);
-  getcode.addEventListener('keydown', function (event) {
-    if (event.key === 'Enter') { event.preventDefault(); goGet(); }
-  });
-
+""" + _compose_wiring_js(track=True) + _get_card_js(track=True) + """
   // Pro fake-door: chip reveals the "coming soon" panel; the email is POSTed to
   // /api/pro-interest (a POST body, never the URL, so it stays out of any log).
-  // Funnel events (pro_click / pro_email) fire via tdTrack (cookieless Umami,
-  // a no-op when the tracker is absent).
+  // This page — the open sender — is the only one left with browser analytics,
+  // and pro_click / feedback_open are the only funnel facts a server log cannot
+  // produce on its own: a click that never becomes a request. They live here,
+  // where no key is ever born, which is what makes ADR 0003 affordable.
   var prochip = document.getElementById('prochip');
   var prodoor = document.getElementById('prodoor');
   var proemail = document.getElementById('proemail');
@@ -640,9 +979,135 @@ var T = @@__T__@@;
 </html>
 """
 
-_RECEIVER_TMPL: Final = _HEAD + """<body>
+# The closed sender. Its own page, with a shell that loads nothing: the key is
+# generated in this tab and never leaves it except in the fragment of the link
+# the sender copies. There is no code to dictate, so the QR is the result rather
+# than a garnish — and a QR is also the only delivery channel that does not put
+# the key into somebody's chat history.
+_CLOSED_SENDER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
 <div class="wrap">
-  <div class="top"><a class="toplink" href="/" aria-label="throw.dog home">""" + _PAW + """<b>throw.dog</b></a></div>
+  """ + _TOP + """
+
+  <h1><span>@@taglineA@@</span> <span class="hl">@@taglineB@@</span></h1>
+  <p class="sub">@@subClosed@@</p>
+
+  """ + _mode_row(closed=True) + """
+
+  <div class="stage" id="stage">
+    """ + _DOG + _BONE + """
+
+    <div class="card">
+      <div id="compose">
+        <textarea id="text" autofocus placeholder="@@placeholder@@"></textarea>
+        <button class="btn wide" id="throw" type="button">@@throwBtn@@</button>
+        <p id="error" class="error" hidden></p>
+      </div>
+
+      <div id="done" hidden>
+        <p class="donelabel">@@doneClosedLabel@@</p>
+        <div class="qr big" id="qr"></div>
+        <div class="url" id="url"></div>
+        <button class="btn ghost" id="copyurl" type="button">@@copyLink@@</button>
+        <p class="hint">@@whyQr@@</p>
+        <p class="hint">@@noWords@@</p>
+        <p class="hint">@@keyOnce@@</p>
+        <button class="btn wide" id="again" type="button">@@againBtn@@</button>
+      </div>
+    </div>
+  </div>
+
+""" + _GET_CARD + """
+
+  <span class="chip">@@chipClosed@@</span>
+
+""" + _FOOTER + """
+</div>
+
+<script>
+var T = @@__T__@@;
+""" + _QR_JS + _CRYPTO_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + """
+(function () {""" + _COMPOSE_JS + """
+  tdRemember('closed');
+  text.value = tdTakeDraft();
+  text.focus();
+
+  // This page can be arrived at directly — a bookmark, or the mode we
+  // remembered — so the check the homepage does cannot be relied on. A browser
+  // that cannot encrypt says so before anything is typed, not after: finding
+  // out at the moment you press throw means having already written the secret.
+  if (!tdCryptoReady()) {
+    fail(T.noCrypto);
+    text.disabled = true;
+    document.getElementById('throw').disabled = true;
+  }
+
+  document.getElementById('switchmode').addEventListener('click', function () {
+    tdRemember('open');
+    tdKeepDraft(text.value);
+    window.location.href = '/';
+  });
+
+  function send(value) {
+    if (busy) { return; }
+    // One of our own closed links, wherever it came from: it carries a key, so
+    // it is opened rather than thrown. Sending it would hand us the one thing
+    // the closed mode promises we never receive.
+    var opening = tdClosedTarget(value);
+    if (opening) { window.location.href = opening; return; }
+    if (!value || !value.trim()) { fail(T.nothing); return; }
+    if (!tdCryptoReady()) { fail(T.noCrypto); return; }
+    busy = true;
+    error.hidden = true;
+    var key;
+    // Encrypt first, then send. The server is never given a chance to hold the
+    // text, not even for the length of one request.
+    tdNewKey().then(function (fresh) {
+      key = fresh;
+      return tdEncrypt(fresh, value);
+    }).then(function (payload) {
+      return fetch('/api/throws', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: payload, enc: TD_ENC })
+      }).then(null, function () { throw new Error(T.netSend); });
+    }).then(function (response) {
+      if (response.status === 413) { throw new Error(T.tooBig); }
+      if (response.status === 400) { throw new Error(T.nothing); }
+      if (!response.ok) { throw new Error(T.throwFailed); }
+      return response.json();
+    }).then(function (data) {
+      return tdExportKey(key).then(function (encoded) {
+        // The key goes in the fragment and nowhere else. Fragments are not sent
+        // with any request, so this URL is the only copy in existence.
+        currentUrl = window.location.origin + '/' + data.code + '#' + encoded;
+        var svg = qrSVG(currentUrl);
+        qrEl.innerHTML = svg;
+        qrEl.hidden = !svg;
+        urlEl.textContent = currentUrl.replace(/^https?:\\/\\//, '');
+        compose.hidden = true;
+        done.hidden = false;
+        throwAnim();
+      });
+    }).catch(function (err) {
+      fail(err && err.message ? err.message : T.netSend);
+    }).then(function () {
+      busy = false;
+    });
+  }
+
+""" + _compose_wiring_js(track=False) + _get_card_js(track=False) + """})();
+</script>
+</body>
+</html>
+"""
+
+# The receiver. Same shell for every address, and the same shell whether or not
+# a key is involved — the page reveals nothing about the throw before it asks.
+# Nothing loaded over the network runs here: the decrypted text ends up in this
+# tab's DOM, where stripping the key out of the URL would not protect it.
+_RECEIVER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
+<div class="wrap">
+  """ + _TOP + """
 
   <div class="stage">
     """ + _DOG + """
@@ -656,39 +1121,92 @@ _RECEIVER_TMPL: Final = _HEAD + """<body>
     </div>
   </div>
 
-  <span class="chip">@@chip@@</span>
+  <span class="chip" id="chip">@@chipEphemeral@@</span>
 
-  <footer class="foot">
-    <a href="/terms">@@footerTerms@@</a>
-    <span aria-hidden="true">·</span>
-    <a href="/privacy">@@footerPrivacy@@</a>
-  </footer>
+""" + _FOOTER + """
 </div>
 
 <script>
 var T = @@__T__@@;
+""" + _CRYPTO_JS + _CLOSED_RE_JS + """
 (function () {
   var status = document.getElementById('status');
   var result = document.getElementById('result');
   var target = document.getElementById('text');
-  var code = window.location.pathname.replace(/^\\/+/, '').replace(/\\/+$/, '');
+  var chip = document.getElementById('chip');
 
-  fetch('/api/throws/' + encodeURIComponent(code), { method: 'POST' })
-    .then(function (response) {
-      if (response.status === 404) { throw new Error(T.notFound); }
-      if (!response.ok) { throw new Error(T.wrong); }
-      return response.json();
-    })
-    .then(function (data) {
-      tdTrack('received');
-      target.textContent = data.text;
-      status.hidden = true;
-      result.hidden = false;
-    })
-    .catch(function (err) {
-      status.className = 'error';
-      status.textContent = err && err.message ? err.message : T.netRecv;
-    });
+  var hash = window.location.hash || '';
+  var key = hash.charAt(0) === '#' ? hash.slice(1) : '';
+  var address = window.location.pathname.replace(/^\\/+/, '').replace(/\\/+$/, '');
+  // Closed addresses and two-word codes are disjoint by construction (see
+  // app.closedaddress), so this page knows a key is needed from the address
+  // alone, before asking the server anything.
+  var closed = CLOSED_RE.test(address);
+
+  function fail(message) {
+    status.className = 'error';
+    status.textContent = message;
+  }
+
+  function show(value) {
+    target.textContent = value;
+    status.hidden = true;
+    result.hidden = false;
+  }
+
+  // The key leaves the address bar the moment its fate is settled, and not
+  // before. Every outcome that leaves the throw alive keeps the URL whole, so
+  // reloading remains the honest advice; once the server has answered, the
+  // throw is spent either way and the key has nothing left to do here.
+  function stripKey() {
+    if (!key) { return; }
+    try {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    } catch (e) {}
+  }
+
+  function read(imported) {
+    return fetch('/api/throws/' + encodeURIComponent(address), { method: 'POST' })
+      // A rejected fetch carries the browser's own wording ("Failed to fetch"),
+      // untranslated and meaningless to the reader. Only messages we chose are
+      // ever put on screen.
+      .then(null, function () { throw new Error(T.netRecv); })
+      .then(function (response) {
+        stripKey();
+        if (response.status === 404) { throw new Error(T.notFound); }
+        if (!response.ok) { throw new Error(T.wrong); }
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data.enc) { show(data.text); return; }
+        if (!imported) { fail(T.keyBad); return; }
+        chip.textContent = T.chipClosed;
+        // Past this point the throw is spent whatever happens: we asked, and we
+        // were given it. A key that does not fit says so plainly, because the
+        // reader's next move is to ask for a new throw, not to reload.
+        return tdDecrypt(imported, data.text).then(show, function () { fail(T.keyBad); });
+      });
+  }
+
+  function netFail(err) {
+    fail(err && err.message ? err.message : T.netRecv);
+  }
+
+  if (!closed) {
+    read(null).catch(netFail);
+  } else if (!tdCryptoReady()) {
+    fail(T.noCrypto);
+  } else if (!key) {
+    fail(T.keyMissing);
+  } else {
+    // The key is checked HERE, before a single byte is asked of the server,
+    // because asking is what consumes the throw. A link truncated mid-key is
+    // the ordinary accident — mail clients wrap long URLs — and it is locally
+    // detectable, so it must not cost the reader the throw. Only a key that is
+    // well-formed but wrong gets that far, and that one we cannot know about
+    // without trying.
+    tdImportKey(key).then(read, function () { fail(T.keyMissing); }).catch(netFail);
+  }
 
   document.getElementById('copy').addEventListener('click', function () {
     var button = document.getElementById('copy');
@@ -714,6 +1232,7 @@ var T = @@__T__@@;
 </html>
 """
 
+
 # --- i18n -------------------------------------------------------------------
 #
 # Every user-facing string lives here, EN first, RU second. Both locales carry
@@ -728,13 +1247,33 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "taglineA": "Throw it.",
         "taglineB": "The dog fetches.",
         "sub": "Paste text — get a short code and a QR. Open them on another device.",
+        "subClosed": "Paste text — it is encrypted here, then you get a QR and a link. There is no code to type.",
         "placeholder": "Paste or type text. Pasting throws it right away.",
         "throwBtn": "throw 🦴",
         "doneLabel": "Type the code on the other device, or scan the QR:",
         "copyLink": "copy link",
         "hint": "The text is deleted the moment this link is opened.",
         "againBtn": "throw again",
-        "chip": "🔒 nothing is stored — gone in 10 minutes",
+        # No unconditional padlock anywhere near a throw: in the open mode there
+        # is nothing for it to promise, and a lock icon reads as a promise.
+        "chipOpen": "gone in 10 minutes — read once, then deleted",
+        "chipClosed": "encrypted on your device — the server only ever holds ciphertext",
+        "chipEphemeral": "read once — gone in 10 minutes",
+        # Mode of the throw. Both halves describe what actually happens, in the
+        # same breath and at the same length, so neither reads as the safe one.
+        "modeLabel": "Mode of the throw",
+        "modeOpenName": "Open",
+        "modeOpenNote": "The server sees your text. A two-word code works — type it on the other device.",
+        "modeClosedName": "Closed",
+        "modeClosedNote": "Encrypted on this device; the server sees only ciphertext. Link or QR only, no code.",
+        "modeClosedUnavailable": "Needs a modern browser over https — this one cannot encrypt.",
+        "doneClosedLabel": "Scan this on the other device:",
+        "whyQr": "Prefer the QR: sending the link means sending the key along with it.",
+        "noWords": "This throw has no two-word code — there is nothing to dictate.",
+        "keyOnce": "The key exists only in this link. We never receive it and cannot bring it back.",
+        "noCrypto": "This browser cannot encrypt here. It needs a modern browser over https.",
+        "keyMissing": "This link has no usable key — the part after # is missing or damaged. The throw is still waiting: ask for the whole link and open it again.",
+        "keyBad": "This key does not fit — wrong or damaged link. The throw has been used up, so ask for a new one.",
         "nothing": "Nothing to throw yet.",
         "tooBig": "Text is too big — 64 KB limit.",
         "throwFailed": "Couldn't throw. Try again.",
@@ -760,7 +1299,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proNet": "Network problem. Try again.",
         "metaDescription": "Move text between devices in seconds: paste it, get two words and a QR, open on the other device. No accounts, no cookies, nothing stored — gone in 10 minutes.",
         "getLabel": "Got a code? Fetch it here:",
-        "getPlaceholder": "two words: basted lily (or basted-lily — both work)",
+        "getPlaceholder": "two words: basted lily — or paste a whole link",
         "getBtn": "fetch",
         "fbChip": "💬 feedback",
         "fbTitle": "Help us make this better",
@@ -774,13 +1313,29 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "taglineA": "Кинь.",
         "taglineB": "Пёс принесёт.",
         "sub": "Вставь текст — получи короткий код и QR. Открой их на другом устройстве.",
+        "subClosed": "Вставь текст — он шифруется здесь, ты получишь QR и ссылку. Код набирать не нужно.",
         "placeholder": "Вставь или набери текст. Вставка бросает сразу.",
         "throwBtn": "бросить 🦴",
         "doneLabel": "Набери код на другом устройстве или отсканируй QR:",
         "copyLink": "копировать ссылку",
         "hint": "Текст удалится, как только эту ссылку откроют.",
         "againBtn": "бросить ещё",
-        "chip": "🔒 ничего не хранится — исчезает через 10 минут",
+        "chipOpen": "исчезает через 10 минут — читается один раз",
+        "chipClosed": "зашифровано на твоём устройстве — у сервера только шифр",
+        "chipEphemeral": "читается один раз — исчезает через 10 минут",
+        "modeLabel": "Режим броска",
+        "modeOpenName": "Открытый",
+        "modeOpenNote": "Сервер видит текст. Работает код из двух слов — набери его на другом устройстве.",
+        "modeClosedName": "Закрытый",
+        "modeClosedNote": "Шифруется на этом устройстве, сервер видит только шифр. Только ссылка или QR, кода нет.",
+        "modeClosedUnavailable": "Нужен современный браузер и https — здесь шифровать нечем.",
+        "doneClosedLabel": "Отсканируй на другом устройстве:",
+        "whyQr": "Лучше QR: отправить ссылку — значит отправить вместе с ней и ключ.",
+        "noWords": "У этого броска нет кода из двух слов — диктовать нечего.",
+        "keyOnce": "Ключ есть только в этой ссылке. Мы его не получаем и вернуть не можем.",
+        "noCrypto": "Этот браузер здесь не умеет шифровать. Нужен современный браузер и https.",
+        "keyMissing": "В ссылке нет годного ключа — часть после # потерялась или побилась. Бросок на месте: попроси прислать ссылку целиком и открой заново.",
+        "keyBad": "Ключ не подошёл — ссылка не та или повреждена. Бросок уже потрачен, попроси бросить заново.",
         "nothing": "Пока нечего бросать.",
         "tooBig": "Слишком большой текст — лимит 64 КБ.",
         "throwFailed": "Не удалось бросить. Попробуй ещё раз.",
@@ -804,7 +1359,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proNet": "Проблема сети. Попробуй ещё раз.",
         "metaDescription": "Перекинь текст между устройствами за секунды: вставь, получи два слова и QR, открой на другом устройстве. Без аккаунтов и куки, ничего не хранится — исчезает через 10 минут.",
         "getLabel": "Есть код? Забери здесь:",
-        "getPlaceholder": "два слова: basted lily (или basted-lily — как угодно)",
+        "getPlaceholder": "два слова: basted lily — или вставь ссылку целиком",
         "getBtn": "принести",
         "fbChip": "💬 отзыв",
         "fbTitle": "Помоги сделать лучше",
@@ -861,6 +1416,11 @@ def _render(template: str, lang: str, head_meta: str = "") -> str:
     """
     strings = STRINGS[lang]
     out = template.replace("@@headMeta@@", head_meta)
+    # The browser needs the same "is this a closed address?" rule the server
+    # uses, and one drifting copy of it would silently break the guarantee that
+    # a keyless arrival never consumes a throw. So it is injected from the
+    # module that owns it, never written out here a second time.
+    out = out.replace("@@__CLOSED_RE__@@", CLOSED_ADDRESS_PATTERN)
     out = out.replace("@@__T__@@", json.dumps(strings, ensure_ascii=False))
     out = out.replace("@@lang@@", lang)
     for key, value in strings.items():
@@ -872,12 +1432,22 @@ def render_sender(lang: str = DEFAULT_LOCALE) -> str:
     return _render(_SENDER_TMPL, lang, head_meta=_SENDER_HEAD_META)
 
 
+def render_closed_sender(lang: str = DEFAULT_LOCALE) -> str:
+    # Not indexable: the homepage is the one entry point, and this page is the
+    # same product with a different mode selected.
+    return _render(_CLOSED_SENDER_TMPL, lang, head_meta=_NOINDEX_META)
+
+
 def render_receiver(lang: str = DEFAULT_LOCALE) -> str:
     return _render(_RECEIVER_TMPL, lang, head_meta=_NOINDEX_META)
 
 
 def sender_page(accept_language: str | None = None) -> str:
     return render_sender(pick_locale(accept_language))
+
+
+def closed_sender_page(accept_language: str | None = None) -> str:
+    return render_closed_sender(pick_locale(accept_language))
 
 
 def receiver_page(accept_language: str | None = None) -> str:
@@ -888,7 +1458,12 @@ def receiver_page(accept_language: str | None = None) -> str:
 #: page-size test can import a ready string. Locale-aware serving uses the
 #: ``*_page(accept_language)`` helpers above.
 SENDER_PAGE: Final = render_sender(DEFAULT_LOCALE)
+CLOSED_SENDER_PAGE: Final = render_closed_sender(DEFAULT_LOCALE)
 RECEIVER_PAGE: Final = render_receiver(DEFAULT_LOCALE)
+
+#: The pages on which a key is born or lives. Nothing loaded over the network
+#: may run here (ADR 0003); a test holds the line.
+KEY_BEARING_PAGES: Final = (CLOSED_SENDER_PAGE, RECEIVER_PAGE)
 
 # The API is banned outright; code pages carry their own noindex (crawlers
 # only ever see one if a human published the link). The rest is public.
@@ -962,11 +1537,27 @@ _TERMS_BODY: Final = f"""    <h2>What this is</h2>
     get a short code and a QR, then open it on the other device. That is the
     whole service — no accounts, no sign-up.</p>
 
+    <h2>Two modes, and what each one means</h2>
+    <p>Before throwing, you choose the mode. In the <b>open</b> mode the throw is
+    addressed by a two-word code you can type on the other device, and the text
+    passes through our memory as you wrote it — we are able to read it. In the
+    <b>closed</b> mode your browser encrypts the text before it leaves the
+    device and we only ever hold ciphertext; the key travels in the part of the
+    link after the <code>#</code>, which browsers never send to a server, so we
+    never receive it. A closed throw has no two-word code and can only be opened
+    from the whole link or its QR.</p>
+    <p>Because we never have the key, we cannot recover a closed throw for you,
+    and we cannot help if the link is lost or truncated. That is the price of the
+    guarantee, not an oversight.</p>
+
     <h2>One throw, one read</h2>
     <p>Each throw is held for about 10 minutes and is deleted the instant it is
-    read — whichever comes first. Opening the link consumes it: the text is gone
-    and the link stops working. Treat every throw as one-time and temporary, and
-    do not rely on it to store anything.</p>
+    handed out — whichever comes first. Opening the link consumes it: the text is
+    gone and the link stops working. In the closed mode this is true even if the
+    key turns out not to fit, because we cannot tell whether decryption
+    succeeded — waiting to be told would be a way to have one throw handed out
+    twice. Treat every throw as one-time and temporary, and do not rely on it to
+    store anything.</p>
 
     <h2>Acceptable use</h2>
     <p>Do not use throw.dog to send illegal content, malware, or anything you
@@ -988,8 +1579,30 @@ _PRIVACY_BODY: Final = f"""    <h2>The short version</h2>
 
     <h2>Your text</h2>
     <p>The text you throw lives only in the server's memory, for about 10 minutes
-    at most, and is erased the moment it is read. Nothing is written to disk and
-    nothing is kept long-term. The content of a throw is never logged.</p>
+    at most, and is erased the moment it is handed out. Nothing is written to
+    disk and nothing is kept long-term. The content of a throw is never logged.</p>
+    <p>In the <b>closed</b> mode what reaches us is ciphertext your browser
+    produced (AES-256-GCM), and the key never reaches us at all: it travels in
+    the fragment of the link — the part after the <code>#</code> — which browsers
+    do not send with any request. We could not read a closed throw if we wanted
+    to, and we cannot recover one for you. In the <b>open</b> mode the text
+    passes through our memory as you wrote it, and we are technically able to
+    read it. The mode is your choice and it is shown on screen when you make
+    it.</p>
+
+    <h2>What the closed mode does not protect you from</h2>
+    <p>It protects you from us as a place your text is stored. It does not
+    protect you from us as the source of the page doing the encrypting: we serve
+    that page, so anyone who can change what we serve could change it. No
+    in-browser encryption anywhere can escape that, and we would rather name it
+    than let the word "encrypted" imply otherwise. What we do about it is
+    narrow and real: on the two pages where a key is created or used &mdash; the
+    closed compose page, and any page that opens a link &mdash; every line of
+    code that runs arrived inside that one document. No analytics, no fonts, no
+    third-party code of any kind is loaded there. Those pages do make one
+    request of their own, for the throw itself, and it never carries the key.
+    Everything else is in the source you received, which is all there is to
+    audit.</p>
 
     <h2>Logs</h2>
     <p>We keep minimal operational logs (for example, that a throw was created or
@@ -998,8 +1611,15 @@ _PRIVACY_BODY: Final = f"""    <h2>The short version</h2>
     working code, and the text is never included.</p>
 
     <h2>Cookies &amp; tracking</h2>
-    <p>None. throw.dog sets no tracking cookies and loads no third-party scripts
-    or fonts — every page is a single self-contained document.</p>
+    <p>No cookies, no profiling, no third-party trackers, no ads. The homepage
+    and the legal pages load one script of our own — a cookieless visit counter
+    self-hosted on our analytics subdomain, which records no identifiers and
+    builds no profile. It is named here rather than tucked away because "no
+    third-party scripts" and "no scripts at all" are different claims, and only
+    the first is true of the homepage. The pages where a key exists &mdash; the
+    closed sender and every page that opens a throw &mdash;
+    load no script at all, by design. Nothing on any page is fetched from a
+    CDN, a font host, or anyone else.</p>
 
     <h2>Contact</h2>
     <p>Questions or abuse reports:
