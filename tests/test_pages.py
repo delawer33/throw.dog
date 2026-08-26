@@ -385,8 +385,26 @@ def test_the_closed_sender_leads_with_the_qr_and_says_why():
     # matters here.)
     assert 'id="codebig"' not in page
     assert page.index('class="qr big"') < page.index('id="url"')
-    for key in ("whyQr", "noWords", "keyOnce"):
-        assert STRINGS["en"][key] in page, key
+    # One line under it, not three. The fact worth carrying is that the key is
+    # only in this link; the rest answered questions nobody had asked.
+    assert page.count('class="hint"') == 1
+    assert STRINGS["en"]["keyOnce"] in page
+
+
+def test_the_closed_result_centres_on_the_qr_and_its_buttons_match():
+    # Both complaints from a real browser: the card hugged the left edge, and
+    # the two buttons were different widths because one was .wide and one was
+    # shrink-to-fit. They now share a row and a flex basis.
+    page = CLOSED_SENDER_PAGE
+    assert 'id="done" class="doneclosed"' in page
+    assert ".doneclosed { text-align: center; }" in page
+    assert "margin: 0 auto 14px" in page, "the QR must centre itself"
+    # Scoped to the result card: the compose button above it is legitimately
+    # full-width, being the only thing to press there.
+    done = page[page.index('id="done"'):page.index('id="again"')]
+    assert 'class="donerow"' in done, "both actions belong to the one row"
+    assert 'id="copyurl"' in done
+    assert "wide" not in done, "a full-width button beside a shrink-to-fit one"
 
 
 def test_the_open_sender_still_leads_with_the_code():
