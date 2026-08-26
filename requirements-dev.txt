@@ -1,3 +1,9 @@
 -r requirements.txt
 pytest==8.3.5
 httpx==0.28.1
+
+# Not a pip package, but a real development dependency: node runs the closed
+# mode's browser crypto (tests/test_crypto_js.py) outside a browser. Without it
+# those tests skip, and "encrypted on the device" goes unproven — so treat a
+# skip as a broken environment, not as normal.
+# node >= 20

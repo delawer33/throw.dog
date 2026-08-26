@@ -10,6 +10,8 @@ container image, not here).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hmac
 import json
@@ -25,6 +27,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from app.closedaddress import is_closed_address
 from app.codewords import normalize
 from app.gatekeeper import (
     DEFAULT_GLOBAL_MISS_THRESHOLD,
@@ -39,6 +42,7 @@ from app.pages import (
     PRIVACY_PAGE,
     ROBOTS_TXT,
     TERMS_PAGE,
+    closed_sender_page,
     receiver_page,
     sender_page,
 )
@@ -46,6 +50,7 @@ from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 
 DEFAULT_TTL_SECONDS = 600
 DEFAULT_MAX_BYTES = 65536
+
 DEFAULT_MISS_DELAY_MS = 1000
 #: Extra delay added on TOP of the base miss delay when the gatekeeper says this
 #: IP is over its miss-budget, or the global tarpit is engaged. Deliberately much
@@ -87,6 +92,56 @@ DEFAULT_FORWARDED_HEADER = "X-Forwarded-For"
 #: generous — its job is to stop a 100 MB flood, not to police the text size.
 _BODY_SLACK_FACTOR = 8
 _BODY_SLACK_BYTES = 1024
+
+# --- closed throws: the format, and what it costs in bytes ------------------
+
+#: The one encryption format we carry. A version, not a free-form label: the
+#: sender's browser and this server have to agree on the layout of the bytes
+#: (12-byte IV, then AES-256-GCM ciphertext with its 16-byte tag, all base64),
+#: and an unrecognised version means they do not. We never decrypt any of it —
+#: this string is passed from one browser to the other, nothing more.
+ENC_SCHEME = "aes-gcm-v1"
+
+#: AES-GCM's authentication tag, and the IV that precedes the ciphertext. Used
+#: only to convert between what the sender typed and what arrived here; the
+#: server never touches either field.
+_GCM_TAG_BYTES = 16
+_GCM_IV_BYTES = 12
+
+
+def encrypted_ceiling(plaintext_max_bytes: int) -> int:
+    """How many bytes of payload a ``plaintext_max_bytes`` text turns into.
+
+    A closed throw arrives as base64 of ``IV || ciphertext || tag``, a third
+    larger than what the sender actually typed. That expansion is our
+    arithmetic, not theirs: the visible limit has to be identical in both modes,
+    or a closed sender would learn about base64 from an error message about a
+    text that looked well inside it.
+    """
+    binary = _GCM_IV_BYTES + plaintext_max_bytes + _GCM_TAG_BYTES
+    return 4 * ((binary + 2) // 3)
+
+
+def encrypted_plaintext_bytes(text: str) -> int | None:
+    """How much plaintext a closed payload accounts for; ``None`` if it is not one.
+
+    The mirror of :func:`encrypted_ceiling`, and the reason it exists is not
+    tidiness. ``enc`` arrives on the client's word, so measuring a closed throw
+    by its own length would quietly turn one limit into two: anyone could claim
+    the flag and store a third more raw text than the stated limit allows. Going
+    back through the base64 measures every throw in the same units — the bytes
+    the human actually typed — so the limit is one limit.
+
+    This is arithmetic about size, not inspection of content: we decode the
+    base64 and count, and we could not do more if we wanted to. No key is here,
+    and none ever will be.
+    """
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    return max(0, len(raw) - _GCM_IV_BYTES - _GCM_TAG_BYTES)
+
 
 #: One body for every kind of miss — never existed, expired, already read.
 #: Telling them apart would turn code-guessing into a search with feedback.
@@ -286,7 +341,17 @@ _active_log_hmac_secret = _DEFAULT_LOG_HMAC_SECRET
 #: is a receiver code (``/red-fox``) or a read (``/api/throws/red-fox``) and
 #: must be pseudonymised before it reaches the access log.
 _SAFE_LOG_PATHS = frozenset(
-    {"/", "/healthz", "/robots.txt", "/api/throws", "/api/pro-interest", "/api/feedback"}
+    {
+        "/",
+        "/closed",
+        "/terms",
+        "/privacy",
+        "/healthz",
+        "/robots.txt",
+        "/api/throws",
+        "/api/pro-interest",
+        "/api/feedback",
+    }
 )
 
 
@@ -309,15 +374,22 @@ def code_pseudonym(code: str, secret: bytes | None = None) -> str:
     return digest[:_CODE_PSEUDONYM_LEN]
 
 
-def log_event(event: str, code: str) -> None:
+def log_event(event: str, code: str, *, encrypted: bool | None = None) -> None:
     """One machine-readable line per interesting moment, on stdout.
 
     Throw content never appears here — nor does the raw code: only its stable
     pseudonym, so created and read of the same throw still line up.
+
+    ``encrypted`` adds the throw's mode when there is one. It is a fact about
+    the throw, not about what was in it, and it is the whole of what the funnel
+    needs now that the key-bearing pages carry no browser analytics. The key
+    itself cannot appear here even by accident: it travels in the fragment of
+    the link, which no browser sends to us.
     """
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    mode = "" if encrypted is None else f" mode={'closed' if encrypted else 'open'}"
     print(
-        f"event={event} code={code_pseudonym(code)} ts={timestamp}",
+        f"event={event} code={code_pseudonym(code)}{mode} ts={timestamp}",
         file=sys.stdout,
         flush=True,
     )
@@ -337,6 +409,11 @@ def sanitize_log_path(raw_path: str) -> str:
     its ``event=read`` line and the two streams would fail to correlate. When the
     segment does not normalise to a real code we fall back to hashing it raw:
     still never the plaintext, just an uncorrelatable stand-in for a probe.
+
+    A closed address falls into that same raw branch, which is exactly right:
+    it has no canonical form to normalise to (it is matched exactly), so hashing
+    it verbatim is what makes its create and read lines pair up. Either way the
+    address never appears in a log we keep.
     """
     path = raw_path.split("?", 1)[0]
     if path in _SAFE_LOG_PATHS:
@@ -403,7 +480,11 @@ def create_app(
     )
     miss_delay_seconds = config.miss_delay_ms / 1000.0
     tarpit_delay_seconds = config.gate_tarpit_delay_ms / 1000.0
-    max_body_bytes = config.max_bytes * _BODY_SLACK_FACTOR + _BODY_SLACK_BYTES
+    # The ceiling the server actually enforces on arriving text. A closed throw
+    # is base64 of the same text, so it is allowed to be correspondingly bigger
+    # — the human-visible limit stays config.max_bytes in both modes.
+    closed_max_bytes = encrypted_ceiling(config.max_bytes)
+    max_body_bytes = closed_max_bytes * _BODY_SLACK_FACTOR + _BODY_SLACK_BYTES
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -466,6 +547,9 @@ def create_app(
         return PlainTextResponse(ROBOTS_TXT)
 
     def too_big(size: int | None = None) -> JSONResponse:
+        # The limit named here is always the visible one. A closed sender is
+        # over it by the same text that would be over it in the open mode, so
+        # the number they see is the number they can act on.
         measured = "the request body" if size is None else f"{size} bytes"
         return JSONResponse(
             {"detail": f"text is too big: {measured}, limit is {config.max_bytes}"},
@@ -494,19 +578,42 @@ def create_app(
                 {"detail": "expected a JSON object with a text field"}, status_code=400
             )
 
+        # ``enc`` absent (or null, which is how a client says the same thing in
+        # JSON) means an open throw. Anything else must be the one format we
+        # carry: a version we do not know means the two ends disagree about the
+        # bytes, and storing it anyway would produce a throw nobody can read.
+        scheme = payload.get("enc")
+        if scheme is not None and scheme != ENC_SCHEME:
+            return JSONResponse(
+                {"detail": "unknown encryption scheme"}, status_code=400
+            )
+        encrypted = scheme is not None
+
         text = payload["text"]
         if not text.strip():
             return JSONResponse({"detail": "nothing to throw"}, status_code=400)
-        size = len(text.encode("utf-8"))
-        if size > config.max_bytes:
-            return too_big(size)
+        if encrypted:
+            # Measured in the sender's units, not ours: the number in a 413 is
+            # the size of the text they pasted, and the limit it is compared
+            # against is the same one an open throw is held to.
+            carried = encrypted_plaintext_bytes(text)
+            if carried is None:
+                return JSONResponse(
+                    {"detail": "an enc payload must be base64"}, status_code=400
+                )
+            if carried > config.max_bytes:
+                return too_big(carried)
+        else:
+            size = len(text.encode("utf-8"))
+            if size > config.max_bytes:
+                return too_big(size)
         try:
-            code = throws.put(text)
+            code = throws.put(text, encrypted=encrypted)
         except (StoreFull, OutOfCodes):
             return JSONResponse(
                 {"detail": "service is busy, try again in a minute"}, status_code=503
             )
-        log_event("created", code)
+        log_event("created", code, encrypted=encrypted)
         return JSONResponse({"code": code}, status_code=201)
 
     @app.post("/api/throws/{code}")
@@ -518,14 +625,33 @@ def create_app(
         # enumeration slower, it does not lock out anyone holding a real code.
         ip = client_ip(request, config)
 
-        canonical = normalize(code)
-        text = throws.take(canonical) if canonical is not None else None
-        if text is not None:
+        # Two address spaces, deliberately disjoint (see app.closedaddress). A
+        # code is retyped by hand, so it is normalised forgivingly; an address
+        # is only ever pasted by a machine, so it is matched exactly.
+        closed = is_closed_address(code)
+        canonical = code if closed else normalize(code)
+        taken = throws.take(canonical) if canonical is not None else None
+        if taken is not None:
             # A hit is free: recorded as such (a no-op for counting) and never
             # rate-limited. One-time-take semantics are unchanged.
             gate.record(ip, ReadOutcome.HIT)
-            log_event("read", canonical)
-            return JSONResponse({"text": text})
+            log_event("read", canonical, encrypted=taken.encrypted)
+            body = {"text": taken.text}
+            if taken.encrypted:
+                # The receiving browser needs to know to reach for the key in
+                # the fragment. We hand back the format, never a key — we have
+                # never had one.
+                body["enc"] = ENC_SCHEME
+            return JSONResponse(body)
+
+        if closed:
+            # A miss on a closed address is not evidence of code-guessing: the
+            # space is ~68 bits and nobody types it, so it cannot be enumerated
+            # in the first place. Charging it to the per-IP budget would let a
+            # flood of nonsense addresses tarpit the honest reader sharing that
+            # NAT — the very person the budget exists to protect. An IP already
+            # over budget still pays the tarpit; it just does not sink deeper.
+            return await miss(tarpitted=not gate.allow(ip))
 
         # A miss: count it, then let the (now-updated) gate decide whether this
         # IP is over budget or the global tarpit is engaged. Either way the body
@@ -609,6 +735,15 @@ def create_app(
     @app.get("/privacy", response_class=HTMLResponse)
     async def get_privacy_page() -> HTMLResponse:
         return HTMLResponse(PRIVACY_PAGE)
+
+    # The closed sender lives on its own page rather than as a redraw of the
+    # homepage: the homepage has already loaded a script from the network, and a
+    # loaded script cannot be unloaded from a tab where a key is about to be
+    # generated (ADR 0003). Registered before the ``/{code}`` catch-all, like
+    # the legal pages, so the word never resolves as a throw address.
+    @app.get("/closed", response_class=HTMLResponse)
+    async def get_closed_sender_page(request: Request) -> HTMLResponse:
+        return HTMLResponse(closed_sender_page(request.headers.get("accept-language")))
 
     @app.get("/{code}", response_class=HTMLResponse)
     async def get_receiver_page(code: str, request: Request) -> HTMLResponse:
