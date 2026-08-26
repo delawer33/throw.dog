@@ -214,7 +214,7 @@ _STYLE: Final = """
 
   /* Mode of the throw: two halves, the current one filled in. Both carry
      their own line, so the choice is made on what each mode actually does. */
-  .modes { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  .modes { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 44px; }
   .mode {
     flex: 1 1 200px; text-align: left; font-family: inherit; cursor: pointer;
     background: #fff; color: var(--ink); border: 3px solid var(--ink);
@@ -225,9 +225,19 @@ _STYLE: Final = """
   .modename { display: block; font-weight: 900; font-size: 15px; }
   .modenote { display: block; font-weight: 600; font-size: 12.5px; opacity: .75; margin-top: 3px; }
 
-  /* Closed mode delivers by QR or not at all, so the QR is the result, not a
-     garnish beside a code that does not exist. */
-  .qr.big { width: min(230px, 62vw); height: min(230px, 62vw); margin-bottom: 14px; }
+  /* Closed mode delivers by QR or not at all, so the QR is the result rather
+     than a garnish beside a code that does not exist: it is centred, and the
+     card centres on it. The two actions share one row and one flex basis, so
+     they cannot end up different widths; below ~270px the row wraps and they
+     stack, still equal. */
+  .qr.big { width: min(230px, 62vw); height: min(230px, 62vw); margin: 0 auto 14px; }
+  .doneclosed { text-align: center; }
+  .doneclosed .url { font-size: 13px; }
+  .donerow { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+  .donerow .btn {
+    flex: 1 1 130px; margin-top: 0; padding: 14px 10px;
+    font-size: 15px; letter-spacing: .5px; box-shadow: 4px 4px 0 var(--ink);
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .bone, .dog, .stage.thrown #done, .btn { animation: none !important; transition: none !important; }
@@ -1003,15 +1013,15 @@ _CLOSED_SENDER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
         <p id="error" class="error" hidden></p>
       </div>
 
-      <div id="done" hidden>
+      <div id="done" class="doneclosed" hidden>
         <p class="donelabel">@@doneClosedLabel@@</p>
         <div class="qr big" id="qr"></div>
         <div class="url" id="url"></div>
-        <button class="btn ghost" id="copyurl" type="button">@@copyLink@@</button>
-        <p class="hint">@@whyQr@@</p>
-        <p class="hint">@@noWords@@</p>
         <p class="hint">@@keyOnce@@</p>
-        <button class="btn wide" id="again" type="button">@@againBtn@@</button>
+        <div class="donerow">
+          <button class="btn ghost" id="copyurl" type="button">@@copyLink@@</button>
+          <button class="btn" id="again" type="button">@@againBtn@@</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1268,9 +1278,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "modeClosedNote": "Encrypted on this device; the server sees only ciphertext. Link or QR only, no code.",
         "modeClosedUnavailable": "Needs a modern browser over https — this one cannot encrypt.",
         "doneClosedLabel": "Scan this on the other device:",
-        "whyQr": "Prefer the QR: sending the link means sending the key along with it.",
-        "noWords": "This throw has no two-word code — there is nothing to dictate.",
-        "keyOnce": "The key exists only in this link. We never receive it and cannot bring it back.",
+        "keyOnce": "The key exists only in this link — we never receive it and cannot bring it back.",
         "noCrypto": "This browser cannot encrypt here. It needs a modern browser over https.",
         "keyMissing": "This link has no usable key — the part after # is missing or damaged. The throw is still waiting: ask for the whole link and open it again.",
         "keyBad": "This key does not fit — wrong or damaged link. The throw has been used up, so ask for a new one.",
@@ -1330,9 +1338,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "modeClosedNote": "Шифруется на этом устройстве, сервер видит только шифр. Только ссылка или QR, кода нет.",
         "modeClosedUnavailable": "Нужен современный браузер и https — здесь шифровать нечем.",
         "doneClosedLabel": "Отсканируй на другом устройстве:",
-        "whyQr": "Лучше QR: отправить ссылку — значит отправить вместе с ней и ключ.",
-        "noWords": "У этого броска нет кода из двух слов — диктовать нечего.",
-        "keyOnce": "Ключ есть только в этой ссылке. Мы его не получаем и вернуть не можем.",
+        "keyOnce": "Ключ есть только в этой ссылке — мы его не получаем и вернуть не сможем.",
         "noCrypto": "Этот браузер здесь не умеет шифровать. Нужен современный браузер и https.",
         "keyMissing": "В ссылке нет годного ключа — часть после # потерялась или побилась. Бросок на месте: попроси прислать ссылку целиком и открой заново.",
         "keyBad": "Ключ не подошёл — ссылка не та или повреждена. Бросок уже потрачен, попроси бросить заново.",
