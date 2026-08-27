@@ -131,6 +131,15 @@ step "docker compose up -d --build"
 
 remote "cd '$DEPLOY_DIR' && docker compose up -d --build"
 
+# Caddyfile примонтирован файлом, а не запечён в образ: его содержимое могло
+# измениться, но для compose сервис caddy выглядит неизменным и он его не
+# трогает. Graceful `caddy reload` тоже не вариант — admin API выключен
+# (`admin off`), reload ходит именно туда. Значит перезапуск: ~секунда, пока
+# TLS-сокет поднимается заново.
+step "Перезапуск Caddy (перечитать примонтированный Caddyfile)"
+
+remote "cd '$DEPLOY_DIR' && docker compose restart caddy"
+
 step "Состояние контейнеров"
 
 remote "cd '$DEPLOY_DIR' && docker compose ps"

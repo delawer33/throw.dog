@@ -29,6 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from app.closedaddress import is_closed_address
 from app.codewords import normalize
+from app.csp import FLOOR_POLICY
 from app.gatekeeper import (
     DEFAULT_GLOBAL_MISS_THRESHOLD,
     DEFAULT_GLOBAL_WINDOW_SECONDS,
@@ -43,6 +44,7 @@ from app.pages import (
     ROBOTS_TXT,
     TERMS_PAGE,
     closed_sender_page,
+    csp_for,
     receiver_page,
     sender_page,
 )
@@ -524,6 +526,10 @@ def create_app(
         response = await call_next(request)
         if request.url.path not in indexable_paths:
             response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        # Pages set their own policy (it carries their script hashes); anything
+        # else — JSON, robots.txt, errors — gets the floor. Never overwrite:
+        # two policies would intersect and blank the page.
+        response.headers.setdefault("Content-Security-Policy", FLOOR_POLICY)
         return response
 
     async def miss(*, tarpitted: bool = False) -> JSONResponse:
@@ -716,11 +722,19 @@ def create_app(
         log_event("feedback", "-")
         return JSONResponse({"ok": True}, status_code=201)
 
+    def page(html: str) -> HTMLResponse:
+        """Serve a page under a policy computed from that exact page.
+
+        The hashes in the policy come from the bytes below it, so a change to
+        the inline JS can never leave a stale allow-list behind (see app.csp).
+        """
+        return HTMLResponse(html, headers={"Content-Security-Policy": csp_for(html)})
+
     @app.get("/", response_class=HTMLResponse)
     async def get_sender_page(request: Request) -> HTMLResponse:
         # Locale (EN default, RU when the browser prefers it) is decided from
         # Accept-Language; the page is otherwise identical for everyone.
-        return HTMLResponse(sender_page(request.headers.get("accept-language")))
+        return page(sender_page(request.headers.get("accept-language")))
 
     # Static legal pages, English-only (see app.pages). Registered before the
     # ``/{code}`` catch-all so those words never resolve as receiver codes.
@@ -730,11 +744,11 @@ def create_app(
     # step, not provisioned here.
     @app.get("/terms", response_class=HTMLResponse)
     async def get_terms_page() -> HTMLResponse:
-        return HTMLResponse(TERMS_PAGE)
+        return page(TERMS_PAGE)
 
     @app.get("/privacy", response_class=HTMLResponse)
     async def get_privacy_page() -> HTMLResponse:
-        return HTMLResponse(PRIVACY_PAGE)
+        return page(PRIVACY_PAGE)
 
     # The closed sender lives on its own page rather than as a redraw of the
     # homepage: the homepage has already loaded a script from the network, and a
@@ -743,13 +757,13 @@ def create_app(
     # the legal pages, so the word never resolves as a throw address.
     @app.get("/closed", response_class=HTMLResponse)
     async def get_closed_sender_page(request: Request) -> HTMLResponse:
-        return HTMLResponse(closed_sender_page(request.headers.get("accept-language")))
+        return page(closed_sender_page(request.headers.get("accept-language")))
 
     @app.get("/{code}", response_class=HTMLResponse)
     async def get_receiver_page(code: str, request: Request) -> HTMLResponse:
         # Same shell for every code, valid or not: the page reveals nothing,
         # and only its POST can consume a throw.
-        return HTMLResponse(receiver_page(request.headers.get("accept-language")))
+        return page(receiver_page(request.headers.get("accept-language")))
 
     return app
 

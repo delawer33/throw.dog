@@ -8,6 +8,25 @@
 }
 
 {$SITE_DOMAIN} {
+	# Security headers. They are identical for every response and must not
+	# depend on application code, so they live here — with one exception:
+	# Content-Security-Policy is set by the app, because it names each inline
+	# script by hash and only the app knows those. Never set a CSP here too:
+	# two policies intersect, and the intersection is a blank page.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# A closed-throw link carries the key in its fragment. no-referrer so
+		# no click out of that page can hand the URL to anyone.
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# Redundant with frame-ancestors 'none' in the CSP; kept for browsers
+		# that only understand this one.
+		X-Frame-Options "DENY"
+		# Caddy need not announce itself.
+		-Server
+	}
+
 	# Сертификат Cloudflare Origin CA, смонтирован из ./certs read-only.
 	# Cloudflare должен быть в режиме Full (strict) — открытого HTTP
 	# между CDN и ориджином быть не должно.
@@ -35,6 +54,17 @@
 # он выписан на *.throw.dog, поэтому поддомен покрыт. Наружу только Caddy;
 # сам Umami слушает внутри docker-сети на 3000.
 {$ANALYTICS_DOMAIN} {
+	# Umami is a third-party app with its own dashboard: harden the transport
+	# and the frame, but do not police its scripts — a strict CSP here would
+	# blank the dashboard and buy nothing (no key ever touches this host).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+
 	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
 
 	encode zstd gzip

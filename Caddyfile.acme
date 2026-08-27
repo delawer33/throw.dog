@@ -12,6 +12,25 @@
 }
 
 {$SITE_DOMAIN} {
+	# Security headers. They are identical for every response and must not
+	# depend on application code, so they live here — with one exception:
+	# Content-Security-Policy is set by the app, because it names each inline
+	# script by hash and only the app knows those. Never set a CSP here too:
+	# two policies intersect, and the intersection is a blank page.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# A closed-throw link carries the key in its fragment. no-referrer so
+		# no click out of that page can hand the URL to anyone.
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# Redundant with frame-ancestors 'none' in the CSP; kept for browsers
+		# that only understand this one.
+		X-Frame-Options "DENY"
+		# Caddy need not announce itself.
+		-Server
+	}
+
 	# tls-директивы нет: Caddy сам получит сертификат по ACME (HTTP-01),
 	# поэтому порт 80 должен быть открыт наружу.
 	encode zstd gzip
@@ -38,6 +57,17 @@
 # (docker compose --profile analytics up -d). Сам контейнер umami — за профилем;
 # пока он не поднят, поддомен отдаёт 502, что безопасно.
 {$ANALYTICS_DOMAIN} {
+	# Umami is a third-party app with its own dashboard: harden the transport
+	# and the frame, but do not police its scripts — a strict CSP here would
+	# blank the dashboard and buy nothing (no key ever touches this host).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+
 	encode zstd gzip
 
 	log {

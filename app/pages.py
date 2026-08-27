@@ -31,6 +31,7 @@ import os
 from typing import Final
 
 from app.closedaddress import JS_PATTERN as CLOSED_ADDRESS_PATTERN
+from app.csp import policy_for
 
 # Sticker-punk palette and building blocks. No `%` in the template that wraps
 # this (only in _STYLE's own values, which are the format *argument*), so CSS
@@ -299,6 +300,25 @@ _ANALYTICS_SNIPPET: Final = (
     if ANALYTICS_HOST
     else "<script>function tdTrack(n){}</script>\n"
 )
+
+#: The only origin a page may ever reach for code, and only the pages that
+#: actually carry the tracker. Empty when analytics is switched off.
+ANALYTICS_ORIGIN: Final = f"https://{ANALYTICS_HOST}" if ANALYTICS_HOST else ""
+
+
+def csp_for(html: str) -> str:
+    """The Content-Security-Policy to serve alongside ``html``.
+
+    Whether the analytics origin is allowed is read off the page itself — from
+    the tracker's own ``src``, not from prose that happens to name the host —
+    rather than passed in by the caller: a page that does not load the tracker
+    cannot be handed a policy that would let it, however the routing is rewired
+    later.
+    """
+    loads_tracker = bool(ANALYTICS_ORIGIN) and f'src="{ANALYTICS_ORIGIN}/' in html
+    origin = ANALYTICS_ORIGIN if loads_tracker else ""
+    return policy_for(html, origin)
+
 
 #: Inline favicon (a bone), so the /{code} catch-all never sees /favicon.ico
 #: noise and the tab still gets an icon at zero extra requests.
