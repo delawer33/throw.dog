@@ -23,8 +23,10 @@
 		# Redundant with frame-ancestors 'none' in the CSP; kept for browsers
 		# that only understand this one.
 		X-Frame-Options "DENY"
-		# Caddy need not announce itself.
+		# Caddy need not announce itself — and reverse_proxy's own
+		# `Via: 1.1 Caddy` names the same stack, so it goes too.
 		-Server
+		-Via
 	}
 
 	# Сертификат Cloudflare Origin CA, смонтирован из ./certs read-only.
@@ -63,6 +65,7 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		X-Frame-Options "SAMEORIGIN"
 		-Server
+		-Via
 	}
 
 	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key

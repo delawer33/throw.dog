@@ -195,8 +195,9 @@ def test_the_site_block_sets_the_standard_headers(name):
     assert "Permissions-Policy" in block, name
     for feature in ("camera=()", "microphone=()", "geolocation=()"):
         assert feature in block, f"{name}: {feature}"
-    # Caddy should not advertise itself.
+    # Neither Caddy nor its proxy hop should name the stack.
     assert "-Server" in block, name
+    assert "-Via" in block, name
 
 
 @pytest.mark.parametrize("name", CADDYFILES)
@@ -219,5 +220,6 @@ def test_the_analytics_block_is_hardened_but_not_broken(name):
     assert 'Strict-Transport-Security "max-age=31536000; includeSubDomains"' in block, name
     assert 'X-Content-Type-Options "nosniff"' in block, name
     assert "-Server" in block, name
+    assert "-Via" in block, name
     # A strict CSP here would blank the dashboard; frame protection is enough.
     assert "Content-Security-Policy" not in block, name

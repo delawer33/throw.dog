@@ -27,8 +27,10 @@
 		# Redundant with frame-ancestors 'none' in the CSP; kept for browsers
 		# that only understand this one.
 		X-Frame-Options "DENY"
-		# Caddy need not announce itself.
+		# Caddy need not announce itself — and reverse_proxy's own
+		# `Via: 1.1 Caddy` names the same stack, so it goes too.
 		-Server
+		-Via
 	}
 
 	# tls-директивы нет: Caddy сам получит сертификат по ACME (HTTP-01),
@@ -66,6 +68,7 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		X-Frame-Options "SAMEORIGIN"
 		-Server
+		-Via
 	}
 
 	encode zstd gzip
