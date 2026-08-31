@@ -1,0 +1,7 @@
+# Секрет-гардрейл: gitleaks на каждый коммит, ловит утечку ДО попадания в
+# историю. Установка один раз в клоне: `pre-commit install`.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.3
+    hooks:
+      - id: gitleaks
