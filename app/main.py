@@ -39,6 +39,7 @@ from app.gatekeeper import (
     Gatekeeper,
     ReadOutcome,
 )
+from app.landings import INDEXABLE_PATHS, LANDING_PAGES, SITEMAP_XML
 from app.pages import (
     PRIVACY_PAGE,
     ROBOTS_TXT,
@@ -341,7 +342,8 @@ _active_log_hmac_secret = _DEFAULT_LOG_HMAC_SECRET
 
 #: Paths uvicorn may log verbatim: they carry no throw code. Everything else
 #: is a receiver code (``/red-fox``) or a read (``/api/throws/red-fox``) and
-#: must be pseudonymised before it reaches the access log.
+#: must be pseudonymised before it reaches the access log. The SEO landings
+#: are registered routes like ``/terms`` — public documents, never codes.
 _SAFE_LOG_PATHS = frozenset(
     {
         "/",
@@ -350,11 +352,12 @@ _SAFE_LOG_PATHS = frozenset(
         "/privacy",
         "/healthz",
         "/robots.txt",
+        "/sitemap.xml",
         "/api/throws",
         "/api/pro-interest",
         "/api/feedback",
     }
-)
+) | {f"/{slug}" for slug in LANDING_PAGES}
 
 
 def code_pseudonym(code: str, secret: bytes | None = None) -> str:
@@ -516,10 +519,12 @@ def create_app(
     app.state.store = throws
     app.state.gatekeeper = gate
 
-    # Public launch: the homepage and legal pages ARE indexable; everything
-    # else — receiver /{code} pages (one-time secrets) and the API — stays out
-    # of every index via the header (code pages also carry a <meta robots>).
-    indexable_paths = {"/", "/terms", "/privacy", "/robots.txt"}
+    # Public launch: the homepage, legal pages and SEO landings ARE indexable;
+    # everything else — receiver /{code} pages (one-time secrets) and the API —
+    # stays out of every index via the header (code pages also carry a
+    # <meta robots>). robots.txt and the sitemap are crawl plumbing, not pages,
+    # but a noindex header on either would be nonsense.
+    indexable_paths = set(INDEXABLE_PATHS) | {"/robots.txt", "/sitemap.xml"}
 
     @app.middleware("http")
     async def no_index(request: Request, call_next):
@@ -551,6 +556,10 @@ def create_app(
     @app.get("/robots.txt", response_class=PlainTextResponse)
     async def robots() -> PlainTextResponse:
         return PlainTextResponse(ROBOTS_TXT)
+
+    @app.get("/sitemap.xml")
+    async def sitemap() -> Response:
+        return Response(SITEMAP_XML, media_type="application/xml")
 
     def too_big(size: int | None = None) -> JSONResponse:
         # The limit named here is always the visible one. A closed sender is
@@ -758,6 +767,20 @@ def create_app(
     @app.get("/closed", response_class=HTMLResponse)
     async def get_closed_sender_page(request: Request) -> HTMLResponse:
         return page(closed_sender_page(request.headers.get("accept-language")))
+
+    # SEO landings: static English documents, one route per slug, registered
+    # before the ``/{code}`` catch-all like every other named page. Each is
+    # served under a policy computed from its own bytes; the secret-cluster
+    # pages rendered from the closed-sender template therefore carry the same
+    # no-network-code policy as /closed itself.
+    def _landing_endpoint(html: str):
+        async def serve_landing() -> HTMLResponse:
+            return page(html)
+
+        return serve_landing
+
+    for slug, html in LANDING_PAGES.items():
+        app.get(f"/{slug}", response_class=HTMLResponse)(_landing_endpoint(html))
 
     @app.get("/{code}", response_class=HTMLResponse)
     async def get_receiver_page(code: str, request: Request) -> HTMLResponse:

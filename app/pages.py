@@ -240,6 +240,11 @@ _STYLE: Final = """
     font-size: 15px; letter-spacing: .5px; box-shadow: 4px 4px 0 var(--ink);
   }
 
+  /* SEO landing prose: the same .prose card the legal pages use, spaced to sit
+     below the chips. The copy is part of the page, not a page of its own. */
+  .card.seo { margin-top: 34px; }
+  .card.seo .related { margin-top: 18px; }
+
   @media (prefers-reduced-motion: reduce) {
     .bone, .dog, .stage.thrown #done, .btn { animation: none !important; transition: none !important; }
     .stage.thrown .bone { opacity: 0; }
@@ -334,7 +339,7 @@ _HEAD_TMPL: Final = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 @@headMeta@@
-<title>throw.dog</title>
+<title>@@title@@</title>
 %s
 <style>%s</style>
 %s</head>
@@ -543,8 +548,18 @@ _TOP: Final = (
 _FOOTER: Final = """  <footer class="foot">
     <a href="/terms">@@footerTerms@@</a>
     <span aria-hidden="true">·</span>
-    <a href="/privacy">@@footerPrivacy@@</a>
+    <a href="/privacy">@@footerPrivacy@@</a>@@footerGuides@@
   </footer>"""
+
+#: Quiet entry points into the two landing clusters. Homepage only: the spec
+#: joins the clusters through the homepage, never directly — so no landing,
+#: receiver or /closed page carries these (a landing linking the other
+#: cluster, or itself, would be exactly the direct join the spec rules out).
+_FOOTER_GUIDES: Final = """
+    <span aria-hidden="true">·</span>
+    <a href="/send-text-from-pc-to-phone">@@footerGuideDevice@@</a>
+    <span aria-hidden="true">·</span>
+    <a href="/one-time-secret">@@footerGuideSecret@@</a>"""
 
 
 def _mode_row(*, closed: bool) -> str:
@@ -766,11 +781,12 @@ def _compose_wiring_js(*, track: bool) -> str:
 """
 
 
-_SENDER_TMPL: Final = _HEAD + """<body>
-<script>
-// The remembered mode, applied before anything is drawn. Pasting throws the
-// text immediately, so the mode cannot be a decision made in the moment — it
-// has to be already settled by the time the textarea exists.
+#: The remembered mode, applied before anything is drawn. Pasting throws the
+#: text immediately, so the mode cannot be a decision made in the moment — it
+#: has to be already settled by the time the textarea exists. Only the
+#: homepage carries this: a SEO landing must serve the page its URL and
+#: search snippet promised, so it never redirects (the slot renders empty).
+_MODE_REDIRECT_SCRIPT: Final = """<script>
 (function () {
   try {
     if (localStorage.getItem('td_mode') === 'closed'
@@ -783,7 +799,11 @@ _SENDER_TMPL: Final = _HEAD + """<body>
     }
   } catch (e) {}
 })();
-</script>
+</script>"""
+
+
+_SENDER_TMPL: Final = _HEAD + """<body>
+@@modeRedirect@@
 <div class="wrap">
   """ + _TOP + """
 
@@ -847,12 +867,16 @@ _SENDER_TMPL: Final = _HEAD + """<body>
     </div>
     <p id="fbthanks" class="donelabel" hidden></p>
   </div>
-
+@@landingBody@@
 """ + _FOOTER + """
 </div>
 
 <script>
 var T = @@__T__@@;
+// A landing is read, not chosen: merely visiting one must never rewrite the
+// mode the visitor settled on. Only an explicit act — the switch, a throw —
+// may write it there.
+var TD_IS_LANDING = @@isLanding@@;
 """ + _QR_JS + _CRYPTO_CHECK_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + """
 (function () {""" + _COMPOSE_JS + """
   var codebig = document.getElementById('codebig');
@@ -862,7 +886,7 @@ var T = @@__T__@@;
   // page that needs it has loaded.
   if (window.tdLeaving) { return; }
 
-  tdRemember('open');
+  if (!TD_IS_LANDING) { tdRemember('open'); }
   text.value = tdTakeDraft();
   text.focus();
 
@@ -1049,15 +1073,17 @@ _CLOSED_SENDER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
 """ + _GET_CARD + """
 
   <span class="chip">@@chipClosed@@</span>
-
+@@landingBody@@
 """ + _FOOTER + """
 </div>
 
 <script>
 var T = @@__T__@@;
+// Same rule as the open sender: a landing visit never writes the mode.
+var TD_IS_LANDING = @@isLanding@@;
 """ + _QR_JS + _CRYPTO_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + """
 (function () {""" + _COMPOSE_JS + """
-  tdRemember('closed');
+  if (!TD_IS_LANDING) { tdRemember('closed'); }
   text.value = tdTakeDraft();
   text.focus();
 
@@ -1317,6 +1343,9 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         # The pages they point to (/terms, /privacy) are EN-only (launch audience).
         "footerTerms": "Terms",
         "footerPrivacy": "Privacy",
+        # Quiet entry points into the two landing clusters (homepage only).
+        "footerGuideDevice": "PC ↔ phone",
+        "footerGuideSecret": "one-time secret",
         "proChip": "✨ Pro",
         "proTitle": "Pro coming soon, $4/mo",
         "proPerks": "Bigger files, longer TTL, custom codes. Want it? Leave your email.",
@@ -1325,6 +1354,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proThanks": "thanks, you'll be first to know",
         "proBadEmail": "That doesn't look like an email.",
         "proNet": "Network problem. Try again.",
+        "title": "throw.dog — send text between devices in seconds",
         "metaDescription": "Move text between devices in seconds: paste it, get two words and a QR, open on the other device. No accounts, no cookies, nothing stored — gone in 10 minutes.",
         "getLabel": "Got a code? Fetch it here:",
         "getPlaceholder": "two words: basted lily — or paste a whole link",
@@ -1375,6 +1405,8 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "selectFallback": "нажми Ctrl+C / удерживай, чтобы скопировать",
         "footerTerms": "Условия",
         "footerPrivacy": "Приватность",
+        "footerGuideDevice": "ПК ↔ телефон",
+        "footerGuideSecret": "одноразовый секрет",
         "proChip": "✨ Pro",
         "proTitle": "Pro скоро, $4/мес",
         "proPerks": "Больше размер, дольше хранение, свои коды. Нужно? Оставь имейл.",
@@ -1383,6 +1415,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proThanks": "спасибо, сообщим первыми",
         "proBadEmail": "Это не похоже на имейл.",
         "proNet": "Проблема сети. Попробуй ещё раз.",
+        "title": "throw.dog — перекинь текст между устройствами за секунды",
         "metaDescription": "Перекинь текст между устройствами за секунды: вставь, получи два слова и QR, открой на другом устройстве. Без аккаунтов и куки, ничего не хранится — исчезает через 10 минут.",
         "getLabel": "Есть код? Забери здесь:",
         "getPlaceholder": "два слова: basted lily — или вставь ссылку целиком",
@@ -1433,21 +1466,51 @@ def pick_locale(accept_language: str | None) -> str:
     return best_lang
 
 
-def _render(template: str, lang: str, head_meta: str = "") -> str:
+def _render(
+    template: str,
+    lang: str,
+    head_meta: str = "",
+    extra: dict[str, str] | None = None,
+    landing_body: str = "",
+    is_landing: bool = False,
+    footer_guides: bool = False,
+) -> str:
     """Fill a page template's ``@@key@@`` tokens and ``var T`` blob for ``lang``.
 
     ``head_meta`` fills the shell's ``@@headMeta@@`` slot — SEO/preview tags on
     the indexable sender page, ``noindex`` on receiver pages — and may itself
     carry ``@@key@@`` tokens (it is substituted before the string pass).
+
+    ``extra`` overrides individual ``STRINGS`` values for this render — how a
+    SEO landing swaps the headline and sub while keeping every other string
+    identical to the homepage. The overrides touch only the ``@@key@@`` pass,
+    never ``T``: the blob is always serialised from the base ``STRINGS`` so
+    the JS behaves the same on every page that carries the form (overrides are
+    HTML, entities and all — they must never reach a script).
+
+    ``landing_body`` fills the ``@@landingBody@@`` slot the sender templates
+    carry just above the footer; empty everywhere except the SEO landings.
+
+    ``is_landing`` makes the page a *served document* rather than an entry
+    point: the remembered-mode redirect slot renders empty, the JS never
+    writes the mode on load, and the footer's cluster links stay off.
+
+    ``footer_guides`` puts the cluster entry links into the footer. Only the
+    homepage passes it: the spec joins the clusters through the homepage, so
+    landings, /closed and receiver pages all render the slot empty.
     """
-    strings = STRINGS[lang]
+    strings = STRINGS[lang] if extra is None else {**STRINGS[lang], **extra}
     out = template.replace("@@headMeta@@", head_meta)
+    out = out.replace("@@landingBody@@", landing_body)
+    out = out.replace("@@modeRedirect@@", "" if is_landing else _MODE_REDIRECT_SCRIPT)
+    out = out.replace("@@isLanding@@", "true" if is_landing else "false")
+    out = out.replace("@@footerGuides@@", _FOOTER_GUIDES if footer_guides else "")
     # The browser needs the same "is this a closed address?" rule the server
     # uses, and one drifting copy of it would silently break the guarantee that
     # a keyless arrival never consumes a throw. So it is injected from the
     # module that owns it, never written out here a second time.
     out = out.replace("@@__CLOSED_RE__@@", CLOSED_ADDRESS_PATTERN)
-    out = out.replace("@@__T__@@", json.dumps(strings, ensure_ascii=False))
+    out = out.replace("@@__T__@@", json.dumps(STRINGS[lang], ensure_ascii=False))
     out = out.replace("@@lang@@", lang)
     for key, value in strings.items():
         out = out.replace(f"@@{key}@@", value)
@@ -1455,7 +1518,7 @@ def _render(template: str, lang: str, head_meta: str = "") -> str:
 
 
 def render_sender(lang: str = DEFAULT_LOCALE) -> str:
-    return _render(_SENDER_TMPL, lang, head_meta=_SENDER_HEAD_META)
+    return _render(_SENDER_TMPL, lang, head_meta=_SENDER_HEAD_META, footer_guides=True)
 
 
 def render_closed_sender(lang: str = DEFAULT_LOCALE) -> str:
@@ -1466,6 +1529,32 @@ def render_closed_sender(lang: str = DEFAULT_LOCALE) -> str:
 
 def render_receiver(lang: str = DEFAULT_LOCALE) -> str:
     return _render(_RECEIVER_TMPL, lang, head_meta=_NOINDEX_META)
+
+
+def render_landing(
+    *, closed: bool, head_meta: str, strings: dict[str, str], body: str
+) -> str:
+    """One SEO landing: the working sender page under a query-shaped headline.
+
+    A landing is a *variant of the homepage*, not a page of its own kind (see
+    CONTEXT.md): the open cluster renders the open sender, the secret cluster
+    renders the closed sender — with that page's working form and, on the
+    closed one, the no-network-code shell (ADR 0003 holds by construction, and
+    the CSP is computed from the rendered bytes like everywhere else). What a
+    landing deliberately does NOT inherit is the entry-point behaviour: it
+    never redirects to the remembered mode and never writes it — it serves
+    the document its URL promised. English only, like the rest of the launch
+    surface.
+    """
+    template = _CLOSED_SENDER_TMPL if closed else _SENDER_TMPL
+    return _render(
+        template,
+        DEFAULT_LOCALE,
+        head_meta=head_meta,
+        extra=strings,
+        landing_body=body,
+        is_landing=True,
+    )
 
 
 def sender_page(accept_language: str | None = None) -> str:
@@ -1492,8 +1581,11 @@ RECEIVER_PAGE: Final = render_receiver(DEFAULT_LOCALE)
 KEY_BEARING_PAGES: Final = (CLOSED_SENDER_PAGE, RECEIVER_PAGE)
 
 # The API is banned outright; code pages carry their own noindex (crawlers
-# only ever see one if a human published the link). The rest is public.
-ROBOTS_TXT: Final = "User-agent: *\nDisallow: /api/\n"
+# only ever see one if a human published the link). The rest is public, and the
+# sitemap names every page we actually want indexed.
+ROBOTS_TXT: Final = (
+    "User-agent: *\nDisallow: /api/\n\nSitemap: https://throw.dog/sitemap.xml\n"
+)
 
 
 # --- legal pages (Terms / Privacy) ------------------------------------------
@@ -1523,7 +1615,9 @@ ROBOTS_TXT: Final = "User-agent: *\nDisallow: /api/\n"
 _ABUSE_EMAIL: Final = "abuse@throw.dog"
 
 
-def _legal_page(h1_html: str, body_html: str, slug: str, description: str) -> str:
+def _legal_page(
+    h1_html: str, body_html: str, slug: str, description: str, title: str
+) -> str:
     """Wrap static EN legal copy in the shared sticker-punk shell.
 
     ``_HEAD`` still carries the ``@@lang@@`` token (it is shared with the
@@ -1534,7 +1628,11 @@ def _legal_page(h1_html: str, body_html: str, slug: str, description: str) -> st
         f'<meta name="description" content="{description}">\n'
         f'<link rel="canonical" href="https://throw.dog/{slug}">'
     )
-    head = _HEAD.replace("@@lang@@", DEFAULT_LOCALE).replace("@@headMeta@@", meta)
+    head = (
+        _HEAD.replace("@@lang@@", DEFAULT_LOCALE)
+        .replace("@@headMeta@@", meta)
+        .replace("@@title@@", title)
+    )
     return head + f"""<body>
 <div class="wrap">
   <div class="top"><a class="toplink" href="/" aria-label="throw.dog home">{_PAW}<b>throw.dog</b></a></div>
@@ -1657,10 +1755,12 @@ TERMS_PAGE: Final = _legal_page(
     _TERMS_BODY,
     "terms",
     "Terms of service for throw.dog — ephemeral one-time text transfer.",
+    "Terms of Service | throw.dog",
 )
 PRIVACY_PAGE: Final = _legal_page(
     'Privacy <span class="hl">Policy</span>',
     _PRIVACY_BODY,
     "privacy",
     "Privacy policy for throw.dog: no accounts, no cookies, nothing stored.",
+    "Privacy Policy | throw.dog",
 )
