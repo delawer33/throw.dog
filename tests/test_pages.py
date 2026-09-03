@@ -100,11 +100,14 @@ def test_the_open_sender_loads_nothing_but_its_own_analytics():
     # Everything else is inline, with ONE deliberate exception: the cookieless
     # Umami tracker served from our OWN analytics subdomain — self-hosted on the
     # same VPS, not a third-party CDN. The SVG xmlns is a namespace identifier,
-    # not a fetched URL; so are the data-URI favicon and the self-canonical.
+    # not a fetched URL; so are the data-URI favicon, the self-canonical, and
+    # the JSON-LD @context — schema.org names the vocabulary, browsers never
+    # fetch it (and the block is a data script, not an executed one).
     allowed_src = "https://" + ANALYTICS_HOST + "/script.js"
     body = SENDER_PAGE.replace('xmlns="http://www.w3.org/2000/svg"', "")
     body = body.replace("xmlns='http://www.w3.org/2000/svg'", "")
     body = body.replace(allowed_src, "")
+    body = body.replace('"@context":"https://schema.org"', "")
     body = body.replace("https://throw.dog", "")
     assert "http://" not in body
     assert "https://" not in body

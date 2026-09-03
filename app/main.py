@@ -41,6 +41,7 @@ from app.gatekeeper import (
 )
 from app.landings import INDEXABLE_PATHS, LANDING_PAGES, SITEMAP_XML
 from app.pages import (
+    OG_IMAGE_BYTES,
     PRIVACY_PAGE,
     ROBOTS_TXT,
     TERMS_PAGE,
@@ -353,6 +354,7 @@ _SAFE_LOG_PATHS = frozenset(
         "/healthz",
         "/robots.txt",
         "/sitemap.xml",
+        "/og.png",
         "/api/throws",
         "/api/pro-interest",
         "/api/feedback",
@@ -524,7 +526,13 @@ def create_app(
     # stays out of every index via the header (code pages also carry a
     # <meta robots>). robots.txt and the sitemap are crawl plumbing, not pages,
     # but a noindex header on either would be nonsense.
-    indexable_paths = set(INDEXABLE_PATHS) | {"/robots.txt", "/sitemap.xml"}
+    indexable_paths = set(INDEXABLE_PATHS) | {
+        "/robots.txt",
+        "/sitemap.xml",
+        # The preview image must be fetchable by the crawlers that render the
+        # card; a noindex header on it would defeat the card it belongs to.
+        "/og.png",
+    }
 
     @app.middleware("http")
     async def no_index(request: Request, call_next):
@@ -560,6 +568,16 @@ def create_app(
     @app.get("/sitemap.xml")
     async def sitemap() -> Response:
         return Response(SITEMAP_XML, media_type="application/xml")
+
+    @app.get("/og.png")
+    async def og_image() -> Response:
+        # The link-preview card. Served from memory like every other asset
+        # here, and cached hard: it changes only when we redraw it.
+        return Response(
+            OG_IMAGE_BYTES,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=604800, immutable"},
+        )
 
     def too_big(size: int | None = None) -> JSONResponse:
         # The limit named here is always the visible one. A closed sender is

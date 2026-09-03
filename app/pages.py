@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Final
 
 from app.closedaddress import JS_PATTERN as CLOSED_ADDRESS_PATTERN
@@ -370,16 +371,56 @@ _HEAD: Final = _head(analytics=True)
 #: For the closed sender and every receiver page.
 _HEAD_NO_SCRIPT: Final = _head(analytics=False)
 
+#: The link-preview card, shared by every indexable page. A bare link with no
+#: image is the difference between a post that gets clicked and one that
+#: doesn't, and search and shared links are this product's main channel — so
+#: the card is part of the page, not a nicety. The image is our own static PNG,
+#: served from memory; redraw it by rendering ``app/assets/og.source.html`` at
+#: 1200×630 (``google-chrome --headless=new --window-size=1200,630
+#: --screenshot``). ``summary_large_image`` is the format that actually shows
+#: it.
+OG_IMAGE_URL: Final = "https://throw.dog/og.png"
+OG_IMAGE_BYTES: Final = (Path(__file__).parent / "assets" / "og.png").read_bytes()
+
+OG_CARD: Final = f"""<meta property="og:site_name" content="throw.dog">
+<meta property="og:image" content="{OG_IMAGE_URL}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="throw.dog — throw text between devices in seconds">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{OG_IMAGE_URL}">"""
+
+#: Structured data for the pages that carry the working form. It tells a
+#: crawler *what this thing is* rather than only what words it contains: a
+#: free browser tool, no signup. Key-bearing pages deliberately go without —
+#: the block would put a schema.org URL on a page held to zero outside
+#: references (ADR 0003), and no rich result is worth eroding that line.
+JSON_LD: Final = """<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebApplication",
+"name":"throw.dog","url":"https://throw.dog/",
+"applicationCategory":"UtilitiesApplication","operatingSystem":"Any (web browser)",
+"description":"Move text between devices in seconds: paste it, get two words and a QR, open it on the other device. No accounts, nothing stored.",
+"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
+"isAccessibleForFree":true,
+"featureList":["One-time read","10-minute expiry","Two-word codes","QR delivery","End-to-end encrypted mode"]}
+</script>"""
+
 #: Head block for the indexable sender page: description + canonical + link
 #: previews (OG/Twitter). The @@metaDescription@@ token is localised via
 #: STRINGS like every other string.
-_SENDER_HEAD_META: Final = """<meta name="description" content="@@metaDescription@@">
+_SENDER_HEAD_META: Final = (
+    """<meta name="description" content="@@metaDescription@@">
 <link rel="canonical" href="https://throw.dog/">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://throw.dog/">
 <meta property="og:title" content="throw.dog — @@taglineA@@ @@taglineB@@">
 <meta property="og:description" content="@@metaDescription@@">
-<meta name="twitter:card" content="summary">"""
+<meta property="og:locale" content="@@ogLocale@@">
+"""
+    + OG_CARD
+    + "\n"
+    + JSON_LD
+)
 
 #: Receiver pages stay out of every index: the URL is a one-time secret and the
 #: page is meaningless to a crawler.
@@ -1355,6 +1396,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proBadEmail": "That doesn't look like an email.",
         "proNet": "Network problem. Try again.",
         "title": "throw.dog — send text between devices in seconds",
+        "ogLocale": "en_US",
         "metaDescription": "Move text between devices in seconds: paste it, get two words and a QR, open on the other device. No accounts, no cookies, nothing stored — gone in 10 minutes.",
         "getLabel": "Got a code? Fetch it here:",
         "getPlaceholder": "two words: basted lily — or paste a whole link",
@@ -1416,6 +1458,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proBadEmail": "Это не похоже на имейл.",
         "proNet": "Проблема сети. Попробуй ещё раз.",
         "title": "throw.dog — перекинь текст между устройствами за секунды",
+        "ogLocale": "ru_RU",
         "metaDescription": "Перекинь текст между устройствами за секунды: вставь, получи два слова и QR, открой на другом устройстве. Без аккаунтов и куки, ничего не хранится — исчезает через 10 минут.",
         "getLabel": "Есть код? Забери здесь:",
         "getPlaceholder": "два слова: basted lily — или вставь ссылку целиком",
@@ -1626,7 +1669,12 @@ def _legal_page(
     """
     meta = (
         f'<meta name="description" content="{description}">\n'
-        f'<link rel="canonical" href="https://throw.dog/{slug}">'
+        f'<link rel="canonical" href="https://throw.dog/{slug}">\n'
+        '<meta property="og:type" content="website">\n'
+        f'<meta property="og:url" content="https://throw.dog/{slug}">\n'
+        f'<meta property="og:title" content="{title}">\n'
+        f'<meta property="og:description" content="{description}">\n'
+        '<meta property="og:locale" content="en_US">\n' + OG_CARD
     )
     head = (
         _HEAD.replace("@@lang@@", DEFAULT_LOCALE)
@@ -1649,6 +1697,10 @@ def _legal_page(
     <a href="/terms">Terms</a>
     <span aria-hidden="true">·</span>
     <a href="/privacy">Privacy</a>
+    <span aria-hidden="true">·</span>
+    <a href="/send-text-from-pc-to-phone">PC ↔ phone</a>
+    <span aria-hidden="true">·</span>
+    <a href="/one-time-secret">one-time secret</a>
   </footer>
 </div>
 </body>

@@ -194,6 +194,53 @@ def test_sitemap_lists_exactly_the_indexable_pages(client):
     assert response.text.count("<loc>") == len(INDEXABLE_PATHS) == 11
 
 
+def test_every_indexable_page_carries_a_link_preview_card(client):
+    # Search and shared links are the product's main channel: a bare link with
+    # no image is a click not made. The card must be on every page a stranger
+    # can arrive at or share — landings, homepage and the legal pages alike.
+    for path in INDEXABLE_PATHS:
+        body = client.get(path).text
+        assert 'property="og:image" content="https://throw.dog/og.png"' in body, path
+        assert 'name="twitter:card" content="summary_large_image"' in body, path
+        assert 'property="og:site_name"' in body, path
+        assert 'property="og:locale"' in body, path
+
+
+def test_the_preview_image_is_served_and_cacheable(client):
+    response = client.get("/og.png")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert "immutable" in response.headers["cache-control"]
+    # A PNG magic number, so a truncated or swapped asset fails here and not
+    # silently in someone's link preview.
+    assert response.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert "X-Robots-Tag" not in response.headers
+
+
+def test_structured_data_everywhere_except_where_a_key_lives():
+    # It tells a crawler what the product *is*. It carries a schema.org URL,
+    # so it stays off the pages ADR 0003 holds to zero outside references.
+    for slug in _OPEN_SLUGS:
+        assert "application/ld+json" in LANDING_PAGES[slug], slug
+        assert '"@type":"WebApplication"' in LANDING_PAGES[slug], slug
+    for slug in _CLOSED_SLUGS:
+        assert "application/ld+json" not in LANDING_PAGES[slug], slug
+        assert "schema.org" not in LANDING_PAGES[slug], slug
+
+
+def test_legal_pages_are_not_link_graph_dead_ends(client):
+    # /terms and /privacy are indexable and in the sitemap; a crawler landing
+    # there must find a way into the landings rather than a three-link cul-de-sac.
+    for path in ("/terms", "/privacy"):
+        body = client.get(path).text
+        assert 'href="/send-text-from-pc-to-phone"' in body, path
+        assert 'href="/one-time-secret"' in body, path
+
+
+def test_sitemap_dates_every_url():
+    assert SITEMAP_XML.count("<lastmod>") == len(INDEXABLE_PATHS)
+
+
 def test_robots_names_the_sitemap():
     assert "Sitemap: https://throw.dog/sitemap.xml" in ROBOTS_TXT
     assert SITEMAP_XML.count("<url>") == len(INDEXABLE_PATHS)

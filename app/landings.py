@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from html import escape
 from typing import Final
 
-from app.pages import render_landing
+from app.pages import JSON_LD, OG_CARD, render_landing
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,15 +417,18 @@ def _head_meta(landing: Landing) -> str:
     # it must break here loudly as an entity, not silently as stray markup.
     title = escape(landing.title, quote=True)
     description = escape(landing.description, quote=True)
-    return (
+    head = (
         f'<meta name="description" content="{description}">\n'
         f'<link rel="canonical" href="{url}">\n'
         '<meta property="og:type" content="website">\n'
         f'<meta property="og:url" content="{url}">\n'
         f'<meta property="og:title" content="{title}">\n'
         f'<meta property="og:description" content="{description}">\n'
-        '<meta name="twitter:card" content="summary">'
+        '<meta property="og:locale" content="en_US">\n' + OG_CARD
     )
+    # Structured data only where no key is born: on a secret landing the block
+    # would be an outside reference on a page that is held to none (ADR 0003).
+    return head if landing.closed else head + "\n" + JSON_LD
 
 
 def _render_one(landing: Landing) -> str:
@@ -465,11 +468,17 @@ INDEXABLE_PATHS: Final[tuple[str, ...]] = (
     *(f"/{landing.slug}" for landing in LANDINGS),
 )
 
+#: When the landing set last changed. Hand-bumped, because a build timestamp
+#: would tell crawlers every deploy rewrote every page — which is a lie that
+#: costs crawl budget. Bump it when the copy actually changes.
+LANDINGS_LASTMOD: Final = "2026-09-03"
+
 SITEMAP_XML: Final = (
     '<?xml version="1.0" encoding="UTF-8"?>\n'
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
     + "".join(
-        f"  <url><loc>https://throw.dog{path}</loc></url>\n"
+        f"  <url><loc>https://throw.dog{path}</loc>"
+        f"<lastmod>{LANDINGS_LASTMOD}</lastmod></url>\n"
         for path in INDEXABLE_PATHS
     )
     + "</urlset>\n"

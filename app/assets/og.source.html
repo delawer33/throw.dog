@@ -1,0 +1,51 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root { --cream: #FFF3DC; --ink: #181207; --mustard: #FFB302; --red: #FF5B4A; --dot: #E8D9B8; }
+  html, body { width: 1200px; height: 630px; }
+  body {
+    background: var(--cream);
+    background-image: radial-gradient(var(--dot) 2px, transparent 2px);
+    background-size: 28px 28px;
+    font-family: "DejaVu Sans", "Liberation Sans", system-ui, sans-serif;
+    color: var(--ink);
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 0 84px; position: relative; overflow: hidden;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+    font-size: 30px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 30px;
+  }
+  .paw { font-size: 34px; }
+  h1 {
+    font-size: 68px; font-weight: 800; line-height: 1.1; letter-spacing: -2px;
+    max-width: 1000px;
+  }
+  .hl {
+    background: var(--mustard); padding: 2px 14px;
+    box-shadow: 7px 7px 0 var(--ink); display: inline-block;
+    transform: rotate(-1.4deg); margin-top: 10px;
+  }
+  p.sub { font-size: 31px; margin-top: 34px; font-weight: 500; opacity: .82; }
+  .chips { display: flex; gap: 14px; margin-top: 38px; }
+  .chip {
+    border: 3px solid var(--ink); border-radius: 999px;
+    padding: 9px 22px; font-size: 23px; font-weight: 700;
+    box-shadow: 5px 5px 0 var(--ink); background: #fff;
+  }
+  .bone {
+    position: absolute; right: -40px; bottom: -50px;
+    font-size: 340px; transform: rotate(-18deg); opacity: .22;
+  }
+</style></head>
+<body>
+  <div class="brand"><span class="paw">🐾</span><span>throw.dog</span></div>
+  <h1>Throw text between<br><span class="hl">devices in seconds</span></h1>
+  <p class="sub">Two words, or a QR. No login, no app, nothing stored.</p>
+  <div class="chips">
+    <span class="chip">read once</span>
+    <span class="chip">gone in 10 min</span>
+    <span class="chip">end-to-end option</span>
+  </div>
+  <div class="bone">🦴</div>
+</body></html>
