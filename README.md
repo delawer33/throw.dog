@@ -34,9 +34,26 @@ browser ── HTTPS ──> Caddy ──> FastAPI app
   even asks the server (asking is what spends a throw).
 - `app/gatekeeper.py` — per-IP miss budget + global tarpit against code
   enumeration; hits bypass the gate, misses are byte-identical and slow.
-- `app/pages.py` — both pages inline (CSS/JS/SVG/QR), no build step, no
+- `app/pages.py` — every page inline (CSS/JS/SVG/QR), no build step, no
   third-party code on any page where a key is born or lives.
+- `app/csp.py` — the Content-Security-Policy is computed from the bytes of
+  the page being sent, so the inline-script hashes can never go stale.
+- `app/landings.py` — the search landings: one page per query, each a
+  working copy of the homepage rather than a doorway. English at the root,
+  Russian under `/ru/`, paired with `hreflang`.
 - Codes never reach logs in the clear (keyed HMAC pseudonyms).
+
+## Two languages, two sets of addresses
+
+`/` is always English, `/ru/` is always Russian, and neither reads
+`Accept-Language` — a page that picks its language from a request header can
+only be indexed in the language the crawler asked for, and the other version
+exists unseen ([ADR 0004](docs/adr/0004-yazyk-eto-adres.md)). The noindex
+working pages (`/closed`, `/{code}`) still follow the browser, and say so
+with `Vary`.
+
+The link preview image at `/og.png` is served from memory; redraw it by
+rendering `app/assets/og.source.html` at 1200×630 with headless Chrome.
 
 ## Run it locally
 
