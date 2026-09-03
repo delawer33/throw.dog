@@ -6,6 +6,8 @@ every promise of ADR 0003 (a key can be born there), and the crawl plumbing —
 sitemap, robots, indexability headers — names exactly the pages we mean.
 """
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,8 +23,10 @@ from app.pages import ANALYTICS_HOST, ROBOTS_TXT
 
 PAGE_BUDGET = 100 * 1024
 
-_OPEN_SLUGS = tuple(l.slug for l in LANDINGS if not l.closed)
-_CLOSED_SLUGS = tuple(l.slug for l in LANDINGS if l.closed)
+_OPEN_PATHS = tuple(l.path for l in LANDINGS if not l.closed)
+_CLOSED_PATHS = tuple(l.path for l in LANDINGS if l.closed)
+_EN = tuple(l for l in LANDINGS if l.lang == "en")
+_RU = tuple(l for l in LANDINGS if l.lang == "ru")
 
 
 @pytest.fixture()
@@ -34,20 +38,25 @@ def client():
 # --- the sprint's shape -------------------------------------------------------
 
 
-def test_eight_landings_in_two_clusters():
-    # The sprint scope, pinned: four landings per cluster, one page per query,
-    # no file-transfer pages before files exist.
-    assert len(LANDINGS) == 8
-    assert len(_OPEN_SLUGS) == 4
-    assert len(_CLOSED_SLUGS) == 4
+def test_the_sprint_scope_is_pinned():
+    # Eight English pages in two clusters, plus a smaller Russian set written
+    # for the queries Russian searchers actually type — not a translation of
+    # the English list. No file-transfer pages before files exist.
+    assert len(_EN) == 8
+    assert len(tuple(l for l in _EN if not l.closed)) == 4
+    assert len(tuple(l for l in _EN if l.closed)) == 4
+    assert len(_RU) == 5
     for landing in LANDINGS:
         assert "file" not in landing.slug
+    # Every Russian page lives under /ru/, every English one at the root.
+    assert all(l.path.startswith("/ru/") for l in _RU)
+    assert all(not l.path.startswith("/ru/") for l in _EN)
 
 
 def test_titles_descriptions_and_headlines_are_unique():
     # One query = one page, and no page is a copy of a sibling with synonyms
     # swapped in. Uniqueness here is the cheap tripwire for that rule.
-    for field in ("title", "description", "sub"):
+    for field in ("title", "description", "sub", "slug"):
         values = [getattr(landing, field) for landing in LANDINGS]
         assert len(set(values)) == len(values), f"duplicate {field}"
     h1s = [(landing.tagline_a, landing.tagline_b) for landing in LANDINGS]
@@ -55,30 +64,30 @@ def test_titles_descriptions_and_headlines_are_unique():
 
 
 def test_every_landing_stays_under_the_page_budget():
-    for slug, html in LANDING_PAGES.items():
+    for path, html in LANDING_PAGES.items():
         size = len(html.encode("utf-8"))
-        assert size < PAGE_BUDGET, f"{slug} is {size} bytes, budget {PAGE_BUDGET}"
+        assert size < PAGE_BUDGET, f"{path} is {size} bytes, budget {PAGE_BUDGET}"
 
 
 def test_every_landing_carries_the_working_form():
     # A landing without the form is an article, and articles are out of scope.
-    for slug, html in LANDING_PAGES.items():
-        assert 'id="text"' in html, slug
-        assert 'id="throw"' in html, slug
-        assert 'class="modes"' in html, slug
-        assert "@@" not in html, f"{slug}: unfilled token"
+    for path, html in LANDING_PAGES.items():
+        assert 'id="text"' in html, path
+        assert 'id="throw"' in html, path
+        assert 'class="modes"' in html, path
+        assert "@@" not in html, f"{path}: unfilled token"
 
 
 def test_clusters_render_the_mode_their_queries_ask_for():
     # Device queries land on the open sender; secret queries land on the closed
     # one — with encryption machinery actually present, not just promised.
-    for slug in _OPEN_SLUGS:
-        html = LANDING_PAGES[slug]
-        assert "crypto.subtle.encrypt" not in html, slug
-    for slug in _CLOSED_SLUGS:
-        html = LANDING_PAGES[slug]
-        assert "crypto.subtle" in html, slug
-        assert "enc: TD_ENC" in html, slug
+    for path in _OPEN_PATHS:
+        html = LANDING_PAGES[path]
+        assert "crypto.subtle.encrypt" not in html, path
+    for path in _CLOSED_PATHS:
+        html = LANDING_PAGES[path]
+        assert "crypto.subtle" in html, path
+        assert "enc: TD_ENC" in html, path
 
 
 def test_a_landing_is_a_document_not_an_entry_point():
@@ -88,9 +97,9 @@ def test_a_landing_is_a_document_not_an_entry_point():
     # behaviours — that's the pair being pinned here.
     from app.pages import render_sender
 
-    for slug, html in LANDING_PAGES.items():
-        assert "location.replace('/closed')" not in html, slug
-        assert "TD_IS_LANDING = true" in html, slug
+    for path, html in LANDING_PAGES.items():
+        assert "location.replace('/closed')" not in html, path
+        assert "TD_IS_LANDING = true" in html, path
     home = render_sender()
     assert "location.replace('/closed')" in home
     assert "TD_IS_LANDING = false" in home
@@ -98,32 +107,41 @@ def test_a_landing_is_a_document_not_an_entry_point():
 
 def test_seo_meta_is_complete_and_self_canonical():
     for landing in LANDINGS:
-        html = LANDING_PAGES[landing.slug]
+        html = LANDING_PAGES[landing.path]
         assert f"<title>{landing.title}</title>" in html
-        assert f'rel="canonical" href="https://throw.dog/{landing.slug}"' in html
+        assert f'rel="canonical" href="{landing.url}"' in html
         assert 'name="description"' in html
         assert 'property="og:title"' in html
         assert "noindex" not in html
 
 
-def test_cross_links_stay_inside_a_cluster():
-    # The two intents are different people on different errands; the clusters
-    # meet through the homepage, never through each other — anywhere on the
-    # page, footer included. And no page links to itself.
-    for slug in _OPEN_SLUGS:
-        html = LANDING_PAGES[slug]
-        for foreign in _CLOSED_SLUGS:
-            assert f'href="/{foreign}"' not in html, (slug, foreign)
-        for sibling in (s for s in _OPEN_SLUGS if s != slug):
-            assert f'href="/{sibling}"' in html, (slug, sibling)
-        assert f'href="/{slug}"' not in html, slug
-    for slug in _CLOSED_SLUGS:
-        html = LANDING_PAGES[slug]
-        for foreign in _OPEN_SLUGS:
-            assert f'href="/{foreign}"' not in html, (slug, foreign)
-        for sibling in (s for s in _CLOSED_SLUGS if s != slug):
-            assert f'href="/{sibling}"' in html, (slug, sibling)
-        assert f'href="/{slug}"' not in html, slug
+def test_cross_links_stay_inside_a_cluster_and_a_language():
+    # The clusters are different people on different errands and the languages
+    # are different readers; both meet through the homepage, never through each
+    # other's prose. And no page links to itself.
+    for landing in LANDINGS:
+        html = LANDING_PAGES[landing.path]
+        siblings = [
+            other
+            for other in LANDINGS
+            if other.lang == landing.lang
+            and other.closed == landing.closed
+            and other.slug != landing.slug
+        ]
+        for other in siblings:
+            assert f'href="{other.path}"' in html, (landing.slug, other.slug)
+        foreign = [
+            other
+            for other in LANDINGS
+            if other.slug != landing.slug and other not in siblings
+        ]
+        for other in foreign:
+            # The one sanctioned exception: a page may point at its own
+            # counterpart in the other language (that is the language switch).
+            if other.slug == landing.alternate:
+                continue
+            assert f'href="{other.path}"' not in html, (landing.slug, other.slug)
+        assert f'href="{landing.path}"' not in html, landing.slug
 
 
 # --- ADR 0003 holds on the secret cluster ------------------------------------
@@ -134,7 +152,7 @@ def test_no_network_loaded_code_runs_on_a_secret_landing():
     # /closed and the receiver: no loaded script, no analytics, no funnel
     # calls, no URL that fetches anything. Same assertions as
     # test_pages.test_no_network_loaded_code_runs_where_a_key_lives.
-    assert len(CLOSED_LANDING_PAGES) == 4
+    assert len(CLOSED_LANDING_PAGES) == 6
     for html in CLOSED_LANDING_PAGES:
         assert "src=" not in html.lower()
         assert ANALYTICS_HOST not in html
@@ -147,33 +165,33 @@ def test_no_network_loaded_code_runs_on_a_secret_landing():
 
 
 def test_open_landings_carry_the_same_analytics_as_the_homepage():
-    for slug in _OPEN_SLUGS:
-        html = LANDING_PAGES[slug]
-        assert ANALYTICS_HOST in html, slug
-        assert html.lower().count("src=") == 1, slug
+    for path in _OPEN_PATHS:
+        html = LANDING_PAGES[path]
+        assert ANALYTICS_HOST in html, path
+        assert html.lower().count("src=") == 1, path
 
 
 def test_secret_landing_csp_forbids_loading_code(client):
-    for slug in _CLOSED_SLUGS:
-        policy = client.get(f"/{slug}").headers["Content-Security-Policy"]
+    for path in _CLOSED_PATHS:
+        policy = client.get(path).headers["Content-Security-Policy"]
         directives = dict(
             part.strip().split(" ", 1) for part in policy.split(";") if part.strip()
         )
         # Only hashes in script-src: no 'self', no host — the browser enforces
         # ADR 0003 on these pages exactly as it does on /closed.
-        assert "'self'" not in directives["script-src"], slug
-        assert ANALYTICS_HOST not in policy, slug
+        assert "'self'" not in directives["script-src"], path
+        assert ANALYTICS_HOST not in policy, path
 
 
 # --- serving and crawl plumbing ----------------------------------------------
 
 
 def test_landings_are_served_and_indexable(client):
-    for slug in LANDING_PAGES:
-        response = client.get(f"/{slug}")
-        assert response.status_code == 200, slug
-        assert "X-Robots-Tag" not in response.headers, slug
-        assert "noindex" not in response.text, slug
+    for path in LANDING_PAGES:
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert "X-Robots-Tag" not in response.headers, path
+        assert "noindex" not in response.text, path
 
 
 def test_a_landing_slug_never_burns_a_throw(client):
@@ -191,7 +209,7 @@ def test_sitemap_lists_exactly_the_indexable_pages(client):
     assert "X-Robots-Tag" not in response.headers
     for path in INDEXABLE_PATHS:
         assert f"<loc>https://throw.dog{path}</loc>" in response.text
-    assert response.text.count("<loc>") == len(INDEXABLE_PATHS) == 11
+    assert response.text.count("<loc>") == len(INDEXABLE_PATHS) == 17
 
 
 def test_every_indexable_page_carries_a_link_preview_card(client):
@@ -220,12 +238,12 @@ def test_the_preview_image_is_served_and_cacheable(client):
 def test_structured_data_everywhere_except_where_a_key_lives():
     # It tells a crawler what the product *is*. It carries a schema.org URL,
     # so it stays off the pages ADR 0003 holds to zero outside references.
-    for slug in _OPEN_SLUGS:
-        assert "application/ld+json" in LANDING_PAGES[slug], slug
-        assert '"@type":"WebApplication"' in LANDING_PAGES[slug], slug
-    for slug in _CLOSED_SLUGS:
-        assert "application/ld+json" not in LANDING_PAGES[slug], slug
-        assert "schema.org" not in LANDING_PAGES[slug], slug
+    for path in _OPEN_PATHS:
+        assert "application/ld+json" in LANDING_PAGES[path], path
+        assert '"@type":"WebApplication"' in LANDING_PAGES[path], path
+    for path in _CLOSED_PATHS:
+        assert "application/ld+json" not in LANDING_PAGES[path], path
+        assert "schema.org" not in LANDING_PAGES[path], path
 
 
 def test_legal_pages_are_not_link_graph_dead_ends(client):
@@ -241,10 +259,55 @@ def test_localised_pages_admit_that_they_vary(client):
     # The homepage picks its language from Accept-Language, so one URL has two
     # bodies. A cache that isn't told this hands the Russian page to an English
     # reader. EN-only pages must NOT claim to vary — that only splits caches.
-    assert client.get("/").headers["Vary"] == "Accept-Language"
     assert client.get("/closed").headers["Vary"] == "Accept-Language"
-    for path in ("/terms", "/send-text-from-pc-to-phone", "/one-time-secret"):
+    assert client.get("/red-fox").headers["Vary"] == "Accept-Language"
+    for path in ("/", "/ru/", "/terms", "/send-text-from-pc-to-phone"):
         assert "Vary" not in client.get(path).headers, path
+
+
+def test_hreflang_pairs_are_mutual_and_only_ever_true(client):
+    # An hreflang annotation counts only when the page it names returns it.
+    # A one-sided or invented pair is worse than none: it teaches the crawler
+    # to distrust the true pairs too.
+    for landing in LANDINGS:
+        html = LANDING_PAGES[landing.path]
+        if landing.alternate is None:
+            # No counterpart claimed: the page must not name one in the other
+            # language (the footer switch is a link, not an hreflang claim).
+            other_lang = "ru" if landing.lang == "en" else "en"
+            assert f'rel="alternate" hreflang="{other_lang}"' not in html, landing.slug
+            continue
+        other = next(l for l in LANDINGS if l.slug == landing.alternate)
+        assert other.alternate == landing.slug, landing.slug  # mutual
+        assert other.lang != landing.lang, landing.slug
+        for page_html in (html, LANDING_PAGES[other.path]):
+            assert f'hreflang="en" href="{(landing if landing.lang == "en" else other).url}"' in page_html
+            assert f'hreflang="ru" href="{(landing if landing.lang == "ru" else other).url}"' in page_html
+            # x-default sends the reader we cannot place to English.
+            assert 'hreflang="x-default"' in page_html
+            assert 'hreflang="x-default" href="https://throw.dog/ru/' not in page_html
+
+
+def test_homepages_name_each_other(client):
+    for path in ("/", "/ru/"):
+        body = client.get(path).text
+        assert 'hreflang="en" href="https://throw.dog/"' in body, path
+        assert 'hreflang="ru" href="https://throw.dog/ru/"' in body, path
+        assert 'hreflang="x-default" href="https://throw.dog/"' in body, path
+    assert client.get("/ru/").headers.get("X-Robots-Tag") is None
+
+
+def test_russian_pages_are_actually_russian(client):
+    # A translated shell around English copy would be the "рерайт под копирку"
+    # the spec rules out; the whole page is Russian or it is not a RU landing.
+    for landing in _RU:
+        body = client.get(landing.path).text
+        # The shared stylesheet quotes English UI copy in its comments, so the
+        # check is against what the reader sees, not the whole document.
+        visible = re.sub(r"<style>.*?</style>", "", body, flags=re.DOTALL)
+        assert '<html lang="ru"' in body, landing.slug
+        assert "Есть код?" in visible, landing.slug
+        assert "Got a code?" not in visible, landing.slug
 
 
 def test_sitemap_dates_every_url():
@@ -281,12 +344,13 @@ def test_secret_cluster_copy_stays_honest():
     for html in CLOSED_LANDING_PAGES:
         assert "military" not in html.lower()
         assert "unhackable" not in html.lower()
-    comparison = LANDING_PAGES["privnote-alternative"]
+    comparison = LANDING_PAGES["/privnote-alternative"]
     assert "can't protect you from the site" in comparison
     assert "github.com/delawer33/throw.dog" in comparison
 
 
 def test_landing_copy_never_promises_files_yet():
-    for slug, html in LANDING_PAGES.items():
+    for path, html in LANDING_PAGES.items():
         prose = html.split('class="card prose seo"')[1].split("<footer")[0]
-        assert "upload" not in prose.lower(), slug
+        assert "upload" not in prose.lower(), path
+        assert "файл" not in prose.lower(), path

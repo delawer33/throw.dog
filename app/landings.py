@@ -13,11 +13,20 @@ everywhere else.
 
 Landings are written only for what the product already does today — a lied-to
 search intent costs more than early indexation buys — so file-transfer queries
-wait for the file release. English only, like the rest of the launch surface.
+wait for the file release.
+
+Two languages, on separate URLs: English at the root, Russian under ``/ru/``.
+Separate URLs and not one address that guesses, because a page that changes
+language by request header can only ever be indexed in the language the
+crawler happens to ask for — the other one exists and is invisible. Where a
+page has a counterpart in the other language the two name each other with
+``hreflang``, and the Russian set is smaller on purpose: it covers the queries
+Russian searchers actually type, not a translation of the English list.
 
 Each page's copy answers its own intent in its own words — the shared skeleton
-is the form and the shell, never the prose. Cross-links stay inside a cluster;
-the clusters meet only through the homepage footer.
+is the form and the shell, never the prose. The Russian pages are written, not
+translated, for the same reason. Cross-links stay inside a cluster and inside a
+language; the clusters meet only through the homepage footer.
 """
 
 from __future__ import annotations
@@ -26,7 +35,7 @@ from dataclasses import dataclass
 from html import escape
 from typing import Final
 
-from app.pages import JSON_LD, OG_CARD, render_landing
+from app.pages import JSON_LD, OG_CARD, lang_switch, render_landing
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,12 +54,28 @@ class Landing:
     closed: bool
     #: The prose card, ``<h2>/<p>`` sections. No scheme'd URLs on closed pages.
     body: str
+    #: UI language of the whole page. Russian pages live under ``/ru/``.
+    lang: str = "en"
+    #: The slug of this page's counterpart in the other language, when one
+    #: exists. Only a genuine counterpart may be named: hreflang is a claim
+    #: that these two pages are the same page for a different reader, and a
+    #: false pair teaches the crawler to distrust the true ones.
+    alternate: str | None = None
+
+    @property
+    def path(self) -> str:
+        return f"/ru/{self.slug}" if self.lang == "ru" else f"/{self.slug}"
+
+    @property
+    def url(self) -> str:
+        return f"https://throw.dog{self.path}"
 
 
 LANDINGS: Final[tuple[Landing, ...]] = (
     # --- device cluster (open mode) ------------------------------------------
     Landing(
         slug="send-text-from-pc-to-phone",
+        alternate="perekinut-tekst-s-kompa-na-telefon",
         title="Send Text from PC to Phone — No Login, No App | throw.dog",
         description=(
             "Paste text on your PC, get a two-word code and a QR, open it on "
@@ -130,6 +155,7 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     ),
     Landing(
         slug="send-link-from-pc-to-phone",
+        alternate="otpravit-ssylku-s-kompyutera-na-telefon",
         title="Send a Link from PC to Phone — Scan a QR, It Opens | throw.dog",
         description=(
             "Move a URL from your computer to your phone in seconds: paste the "
@@ -164,6 +190,7 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     ),
     Landing(
         slug="send-text-from-phone-to-computer",
+        alternate="skinut-tekst-s-telefona-na-kompyuter",
         title="Send Text from Phone to Computer — No Cable, No Login | throw.dog",
         description=(
             "Type or paste text on your phone, get a two-word code, and enter "
@@ -200,6 +227,7 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     # --- secret cluster (closed mode, ADR 0003 shell) -------------------------
     Landing(
         slug="send-password-securely-one-time",
+        alternate="odnorazovaya-ssylka-s-parolem",
         title="Send a Password Securely — One-Time Link, Encrypted in Your Browser | throw.dog",
         description=(
             "Share a password over a link that works once and dies in 10 "
@@ -286,6 +314,7 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     ),
     Landing(
         slug="self-destructing-note",
+        alternate="odnorazovaya-zapiska",
         title="Self-Destructing Note — Deletes Itself After One Read | throw.dog",
         description=(
             "Write a note that destroys itself: one read or 10 minutes, "
@@ -378,61 +407,331 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     rather than hide behind the word «encrypted». Notes are text up to
     64&nbsp;KB; files aren't here yet.</p>""",
     ),
+    # --- русский кластер: устройства (открытый режим) -------------------------
+    Landing(
+        lang="ru",
+        slug="perekinut-tekst-s-kompa-na-telefon",
+        alternate="send-text-from-pc-to-phone",
+        title="Как перекинуть текст с компа на телефон — без регистрации | throw.dog",
+        description=(
+            "Вставь текст на компьютере, получи два слова и QR, открой на "
+            "телефоне. Без аккаунта, приложений и провода — текст стирается "
+            "после первого прочтения."
+        ),
+        tagline_a="Перекинуть текст",
+        tagline_b="с компа на телефон",
+        sub=(
+            "Вставь текст ниже — получишь два слова и QR. Набери эти два "
+            "слова на телефоне, и текст там."
+        ),
+        closed=False,
+        body="""    <h2>Как это работает</h2>
+    <p>Вставь текст в поле выше — вставка сразу бросает его (набрал руками —
+    нажми кнопку). В ответ придут два коротких слова, вроде
+    <code>red-fox</code>, и QR-код. На телефоне либо наведи камеру на QR,
+    либо открой throw.dog в любом браузере и набери эти два слова. Всё:
+    текст на телефоне, обычно быстрее чем за десять секунд вместе с
+    набором.</p>
+
+    <h2>Без регистрации, приложений и провода</h2>
+    <p>Обычные способы перекинуть текст требуют чего-то заранее: письмо себе
+    — открытой почты на обоих концах, мессенджер — залогиненного аккаунта на
+    втором устройстве, провод — чтобы он нашёлся. Здесь на обоих устройствах
+    просто сайт. Ставить нечего, регистрироваться негде, сопрягать нечего.</p>
+
+    <h2>Убирает за собой сам</h2>
+    <p>Бросок читается один раз и исчезает: как только телефон забрал текст,
+    код перестаёт работать. Непрочитанный бросок сам испаряется через 10
+    минут. Ничего не хранится — значит, нечего потом идти удалять.</p>
+
+    <h2>Работает и в обратную сторону</h2>
+    <p>Тем же приёмом текст едет с телефона на компьютер: бросаешь на
+    телефоне, набираешь два слова на компе. Текст до 64&nbsp;КБ — заметки,
+    адреса, куски кода, целые абзацы.</p>""",
+    ),
+    Landing(
+        lang="ru",
+        slug="skinut-tekst-s-telefona-na-kompyuter",
+        alternate="send-text-from-phone-to-computer",
+        title="Как скинуть текст с телефона на компьютер — без проводов | throw.dog",
+        description=(
+            "Набери или вставь текст на телефоне, получи два слова и введи их "
+            "на компьютере на throw.dog. Работает на рабочем компе, где ничего "
+            "нельзя ставить — это просто сайт."
+        ),
+        tagline_a="Скинуть текст с",
+        tagline_b="телефона на компьютер",
+        sub=(
+            "Вставь текст ниже на телефоне — потом на компьютере открой "
+            "throw.dog и набери два слова в поле «Есть код?»."
+        ),
+        closed=False,
+        body="""    <h2>Как это работает в эту сторону</h2>
+    <p>На телефоне: набери текст выше и нажми бросок — или просто вставь,
+    вставка бросает сразу. Получишь два коротких слова. На компьютере: открой
+    throw.dog и набери эти два слова в поле <i>Есть код?</i>. Сообщение
+    появится на большом экране, готовое к копированию. Десять секунд плюс
+    скорость твоего набора.</p>
+
+    <h2>Сделано для запертого рабочего компа</h2>
+    <p>Классическая версия задачи — рабочая машина, куда нельзя ничего
+    поставить, нельзя воткнуть личный телефон и не хочется логиниться в
+    личную почту или мессенджеры ради одного адреса. Сайт, куда можно
+    набрать два слова, — это всё, что здесь требуется.</p>
+
+    <h2>Ничего не остаётся</h2>
+    <p>На общей или просматриваемой машине это важно вдвойне: бросок
+    прочитан — и его нет, непрочитанный умирает через 10 минут, аккаунта
+    нигде не заводится. Выходить не из чего и подчищать нечего.</p>""",
+    ),
+    Landing(
+        lang="ru",
+        slug="otpravit-ssylku-s-kompyutera-na-telefon",
+        alternate="send-link-from-pc-to-phone",
+        title="Как отправить ссылку с компьютера на телефон — наведи камеру | throw.dog",
+        description=(
+            "Перенеси ссылку с компьютера на телефон за секунды: вставь URL, "
+            "наведи камеру телефона на QR, нажми. Без регистрации и без писем "
+            "самому себе."
+        ),
+        tagline_a="Отправить ссылку с",
+        tagline_b="компьютера на телефон",
+        sub=(
+            "Вставь ссылку ниже — наведи камеру телефона на QR — ссылка на "
+            "телефоне, можно открывать."
+        ),
+        closed=False,
+        body="""    <h2>Версия на две секунды</h2>
+    <p>Вставь ссылку в поле выше — вставка сразу её бросает. Наведи камеру
+    телефона на появившийся QR: телефон откроет бросок, ссылка внутри — жми
+    или копируй. На телефоне вообще ничего набирать не надо, читает
+    камера. Одинаково на iPhone и на Android.</p>
+
+    <h2>Вместо письма самому себе</h2>
+    <p>Обычно ссылку с компьютера на телефон отправляют письмом себе или
+    сообщением в чат с самим собой — то есть логинятся в почту или мессенджер
+    на той машине, за которой сидят, и оставляют ссылку в истории навсегда.
+    Здесь аккаунта нет ни с одной стороны, а бросок стирается после первого
+    прочтения или через 10 минут — что раньше.</p>
+
+    <h2>Камеры под рукой нет?</h2>
+    <p>Тогда работают два слова: открой throw.dog в браузере телефона и
+    набери их. Тот же бросок, тот же результат — и точно так же в обратную
+    сторону, с телефона на компьютер.</p>""",
+    ),
+    # --- русский кластер: секреты (закрытый режим, оболочка ADR 0003) ---------
+    Landing(
+        lang="ru",
+        slug="odnorazovaya-ssylka-s-parolem",
+        alternate="send-password-securely-one-time",
+        title="Одноразовая ссылка с паролем — открывается один раз | throw.dog",
+        description=(
+            "Передай пароль ссылкой, которая работает один раз и умирает "
+            "через 10 минут. Шифруется у тебя в браузере — ключ остаётся в "
+            "ссылке, сервер видит только шифр."
+        ),
+        tagline_a="Одноразовая ссылка",
+        tagline_b="с паролем",
+        sub=(
+            "Вставь пароль ниже — он шифруется прямо здесь, в браузере, а ты "
+            "получаешь одноразовую ссылку и QR."
+        ),
+        closed=True,
+        body="""    <h2>Почему не просто сообщением</h2>
+    <p>Пароль, брошенный в чат или почту, там и остаётся: в двух историях, в
+    двух резервных копиях, на всех устройствах, где эти аккаунты залогинены,
+    годами. Ссылка с этой страницы срабатывает ровно один раз и перестаёт
+    существовать через 10 минут в любом случае — так что в переписке потом
+    останется мёртвая ссылка, а не пароль. Бесплатно, онлайн, без аккаунта с
+    обеих сторон.</p>
+
+    <h2>Шифруется до отправки</h2>
+    <p>Браузер шифрует пароль прямо на этой странице (AES-256-GCM) ещё до
+    того, как что-то уйдёт на сервер. Ключ едет только в той части ссылки,
+    которая идёт после <code>#</code>, — её браузеры не отправляют никакому
+    серверу. Значит, у нас лежит шифр, который мы не можем прочитать. И эта
+    страница не грузит ни одного скрипта из сети, даже нашей аналитики: весь
+    код, который трогает твой секрет, приехал в этом одном документе.</p>
+
+    <h2>Один раз — и честно про это</h2>
+    <p>При первом открытии ссылки бросок выдаётся и уничтожается — даже если
+    у открывшего оказался неверный ключ. Мы не знаем, удалась ли расшифровка
+    на той стороне, а ждать подтверждения означало бы дать способ выдать один
+    секрет дважды. Потерянную ссылку не восстановит никто, включая нас. Это
+    честная цена, названная заранее.</p>
+
+    <h2>Передаёшь из рук в руки?</h2>
+    <p>Тогда QR вместо ссылки: человек сканирует его прямо с твоего экрана, и
+    ключ не попадает ни в какую переписку вообще.</p>""",
+    ),
+    Landing(
+        lang="ru",
+        slug="odnorazovaya-zapiska",
+        alternate="self-destructing-note",
+        title="Одноразовая записка онлайн — самоуничтожается после прочтения | throw.dog",
+        description=(
+            "Записка, которая уничтожает себя: одно прочтение или 10 минут, "
+            "что раньше. Шифруется у тебя на устройстве — прочитать или "
+            "вернуть её не может никто, включая нас."
+        ),
+        tagline_a="Одноразовая",
+        tagline_b="записка",
+        sub=(
+            "Напиши записку ниже — она шифруется прямо здесь, а ссылка "
+            "переживёт ровно одно прочтение."
+        ),
+        closed=True,
+        body="""    <h2>Уничтожена, а не «помечена удалённой»</h2>
+    <p>Записка живёт только в памяти сервера — на диск она не попадает
+    вообще. Стирается в тот момент, когда её прочитали; непрочитанная стирает
+    себя через 10 минут. Здесь нет корзины, отложенного удаления и резервной
+    копии, где что-то задержалось: уничтожение — это и есть способ хранения,
+    а не уборка по расписанию.</p>
+
+    <h2>И нечитаема, пока существует</h2>
+    <p>Ещё до того, как записка уйдёт с этой страницы, браузер её шифрует, а
+    ключ остаётся только в ссылке — в части после <code>#</code>, которую
+    браузеры оставляют себе. Всю свою короткую жизнь на сервере записка
+    лежит шифром без ключа.</p>
+
+    <h2>Странице можно верить на слово</h2>
+    <p>«Шифруется в браузере» стоит ровно столько, сколько стоит страница,
+    которая это делает. Поэтому здесь жёсткое правило: ни один скрипт,
+    загруженный из сети, тут не выполняется — ни аналитика, ни шрифты, ни
+    что-либо стороннее. Всё, что трогает записку, лежит в уже полученном
+    документе, а политика безопасности страницы заставляет браузер это
+    соблюдать, вместо того чтобы полагаться на наши хорошие манеры.</p>
+
+    <h2>Когда это то, что нужно</h2>
+    <p>Код от подъезда гостю, пароль от вайфая, то, что хочется сказать один
+    раз и чтобы оно исчезло. Самоудаляющаяся или самоуничтожающаяся — как ни
+    называй, работает онлайн, в любом браузере, ставить ничего не надо.
+    Написал, отдал ссылку или QR — записка сама себя уничтожит.</p>""",
+    ),
 )
 
-# Pages cross-link inside their own cluster only (the clusters meet through
-# the homepage); the blocks are generated, not hand-written per page, so the
-# set stays consistent when a landing is added or renamed.
-_CLUSTER_LINKS: Final[dict[bool, dict[str, str]]] = {
-    False: {
+#: Labels for the in-cluster link block, per language and cluster. Pages
+#: cross-link inside their own cluster and their own language only (the
+#: clusters meet through the homepage, the languages through hreflang); the
+#: blocks are generated so the set stays consistent when a page is added.
+_CLUSTER_LINKS: Final[dict[tuple[str, bool], dict[str, str]]] = {
+    ("en", False): {
         "send-text-from-pc-to-phone": "Send text from PC to phone",
         "copy-paste-between-devices": "Copy &amp; paste between devices",
         "send-link-from-pc-to-phone": "Send a link from PC to phone",
         "send-text-from-phone-to-computer": "Send text from phone to computer",
     },
-    True: {
+    ("en", True): {
         "send-password-securely-one-time": "Send a password securely",
         "one-time-secret": "One-time secret link",
         "self-destructing-note": "Self-destructing note",
         "privnote-alternative": "Privnote alternative",
     },
+    ("ru", False): {
+        "perekinut-tekst-s-kompa-na-telefon": "Перекинуть текст с компа на телефон",
+        "skinut-tekst-s-telefona-na-kompyuter": "Скинуть текст с телефона на компьютер",
+        "otpravit-ssylku-s-kompyutera-na-telefon": "Отправить ссылку с компьютера на телефон",
+    },
+    ("ru", True): {
+        "odnorazovaya-ssylka-s-parolem": "Одноразовая ссылка с паролем",
+        "odnorazovaya-zapiska": "Одноразовая записка",
+    },
 }
 
+_RELATED_HEADING: Final = {"en": "Related", "ru": "Ещё по теме"}
 
-def _related(own_slug: str, closed: bool) -> str:
+
+def _related(landing: Landing) -> str:
+    prefix = "/ru/" if landing.lang == "ru" else "/"
     links = " ·\n    ".join(
-        f'<a href="/{slug}">{label}</a>'
-        for slug, label in _CLUSTER_LINKS[closed].items()
-        if slug != own_slug
+        f'<a href="{prefix}{slug}">{label}</a>'
+        for slug, label in _CLUSTER_LINKS[(landing.lang, landing.closed)].items()
+        if slug != landing.slug
     )
+    if not links:
+        return ""
     return f"""
 
-    <h2>Related</h2>
+    <h2>{_RELATED_HEADING[landing.lang]}</h2>
     <p class="related">{links}</p>"""
 
 
+#: Where each language's set is rooted, for the hreflang pair on the homepages.
+HOME_URLS: Final[dict[str, str]] = {
+    "en": "https://throw.dog/",
+    "ru": "https://throw.dog/ru/",
+}
+
+
+def hreflang_links(en_url: str | None, ru_url: str | None) -> str:
+    """The ``hreflang`` block naming both versions of one page, plus x-default.
+
+    Both sides must list both URLs — an annotation only counts when it is
+    returned. ``x-default`` points at English: it is what a reader we have no
+    better guess for gets, and the honest default for the launch surface.
+    """
+    out = []
+    if en_url:
+        out.append(f'<link rel="alternate" hreflang="en" href="{en_url}">')
+    if ru_url:
+        out.append(f'<link rel="alternate" hreflang="ru" href="{ru_url}">')
+    if en_url:
+        out.append(f'<link rel="alternate" hreflang="x-default" href="{en_url}">')
+    return "\n".join(out)
+
+
+_BY_SLUG: Final[dict[str, Landing]] = {}
+
+
+def _alternate_urls(landing: Landing) -> tuple[str | None, str | None]:
+    other = _BY_SLUG.get(landing.alternate) if landing.alternate else None
+    if other is None:
+        return (landing.url, None) if landing.lang == "en" else (None, landing.url)
+    return (
+        (landing.url, other.url) if landing.lang == "en" else (other.url, landing.url)
+    )
+
+
 def _head_meta(landing: Landing) -> str:
-    url = f"https://throw.dog/{landing.slug}"
     # The fields land inside double-quoted attributes: a title with a quote in
     # it must break here loudly as an entity, not silently as stray markup.
     title = escape(landing.title, quote=True)
     description = escape(landing.description, quote=True)
+    en_url, ru_url = _alternate_urls(landing)
+    locale = "ru_RU" if landing.lang == "ru" else "en_US"
     head = (
         f'<meta name="description" content="{description}">\n'
-        f'<link rel="canonical" href="{url}">\n'
-        '<meta property="og:type" content="website">\n'
-        f'<meta property="og:url" content="{url}">\n'
+        f'<link rel="canonical" href="{landing.url}">\n'
+        + hreflang_links(en_url, ru_url)
+        + "\n"
+        + '<meta property="og:type" content="website">\n'
+        f'<meta property="og:url" content="{landing.url}">\n'
         f'<meta property="og:title" content="{title}">\n'
         f'<meta property="og:description" content="{description}">\n'
-        '<meta property="og:locale" content="en_US">\n' + OG_CARD
+        f'<meta property="og:locale" content="{locale}">\n' + OG_CARD
     )
     # Structured data only where no key is born: on a secret landing the block
     # would be an outside reference on a page that is held to none (ADR 0003).
     return head if landing.closed else head + "\n" + JSON_LD
 
 
+_SWITCH_LABEL: Final = {"en": "Русский", "ru": "English"}
+
+
+def _lang_switch(landing: Landing) -> str:
+    """Where the other language's reader is sent from this page.
+
+    A page with a counterpart points straight at it; one without points at the
+    other language's homepage. The link is UI, not a claim — only a real
+    counterpart is ever named in ``hreflang``.
+    """
+    other = _BY_SLUG.get(landing.alternate) if landing.alternate else None
+    href = other.path if other else ("/" if landing.lang == "ru" else "/ru/")
+    return lang_switch(href, _SWITCH_LABEL[landing.lang])
+
+
 def _render_one(landing: Landing) -> str:
-    body = landing.body + _related(landing.slug, landing.closed)
+    body = landing.body + _related(landing)
     overrides = {
         "title": landing.title,
         "taglineA": landing.tagline_a,
@@ -442,30 +741,35 @@ def _render_one(landing: Landing) -> str:
     }
     return render_landing(
         closed=landing.closed,
+        lang=landing.lang,
         head_meta=_head_meta(landing),
         strings=overrides,
         body=f'\n  <div class="card prose seo">\n{body}\n  </div>\n',
+        lang_switch_html=_lang_switch(landing),
     )
 
 
-#: slug → rendered page, in sprint order. Rendered once at import, like every
-#: other page constant: the landings are static English documents.
+_BY_SLUG.update({landing.slug: landing for landing in LANDINGS})
+
+#: path → rendered page, in sprint order. Rendered once at import, like every
+#: other page constant: the landings are static documents.
 LANDING_PAGES: Final[dict[str, str]] = {
-    landing.slug: _render_one(landing) for landing in LANDINGS
+    landing.path: _render_one(landing) for landing in LANDINGS
 }
 
-#: The secret-cluster pages: a key can be born on these, so the ADR 0003 test
-#: holds them to the same line as /closed and the receiver page.
+#: The secret-cluster pages, both languages: a key can be born on these, so the
+#: ADR 0003 test holds them to the same line as /closed and the receiver page.
 CLOSED_LANDING_PAGES: Final[tuple[str, ...]] = tuple(
-    LANDING_PAGES[landing.slug] for landing in LANDINGS if landing.closed
+    LANDING_PAGES[landing.path] for landing in LANDINGS if landing.closed
 )
 
 #: Everything we want indexed, for the sitemap and for main.py's header logic.
 INDEXABLE_PATHS: Final[tuple[str, ...]] = (
     "/",
+    "/ru/",
     "/terms",
     "/privacy",
-    *(f"/{landing.slug}" for landing in LANDINGS),
+    *(landing.path for landing in LANDINGS),
 )
 
 #: When the landing set last changed. Hand-bumped, because a build timestamp

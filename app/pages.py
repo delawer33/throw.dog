@@ -405,22 +405,40 @@ JSON_LD: Final = """<script type="application/ld+json">
 "featureList":["One-time read","10-minute expiry","Two-word codes","QR delivery","End-to-end encrypted mode"]}
 </script>"""
 
-#: Head block for the indexable sender page: description + canonical + link
-#: previews (OG/Twitter). The @@metaDescription@@ token is localised via
-#: STRINGS like every other string.
-_SENDER_HEAD_META: Final = (
-    """<meta name="description" content="@@metaDescription@@">
-<link rel="canonical" href="https://throw.dog/">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://throw.dog/">
-<meta property="og:title" content="throw.dog — @@taglineA@@ @@taglineB@@">
-<meta property="og:description" content="@@metaDescription@@">
-<meta property="og:locale" content="@@ogLocale@@">
-"""
-    + OG_CARD
-    + "\n"
-    + JSON_LD
+#: The two homepages, one per language, each at its own address: English at
+#: the root, Russian under /ru/. Separate URLs rather than one address that
+#: reads Accept-Language, because a page that changes language by header can
+#: only be indexed in the language the crawler asked for — the other version
+#: exists and stays invisible. The way across is a visible link, not a guess.
+HOME_URL: Final[dict[str, str]] = {
+    "en": "https://throw.dog/",
+    "ru": "https://throw.dog/ru/",
+}
+
+_HREFLANG_HOME: Final = (
+    f'<link rel="alternate" hreflang="en" href="{HOME_URL["en"]}">\n'
+    f'<link rel="alternate" hreflang="ru" href="{HOME_URL["ru"]}">\n'
+    f'<link rel="alternate" hreflang="x-default" href="{HOME_URL["en"]}">'
 )
+
+
+def _sender_head_meta(lang: str) -> str:
+    """Head block for a homepage: description, canonical, hreflang, preview."""
+    url = HOME_URL[lang]
+    return (
+        '<meta name="description" content="@@metaDescription@@">\n'
+        f'<link rel="canonical" href="{url}">\n'
+        + _HREFLANG_HOME
+        + "\n"
+        + '<meta property="og:type" content="website">\n'
+        f'<meta property="og:url" content="{url}">\n'
+        '<meta property="og:title" content="throw.dog — @@taglineA@@ @@taglineB@@">\n'
+        '<meta property="og:description" content="@@metaDescription@@">\n'
+        '<meta property="og:locale" content="@@ogLocale@@">\n'
+        + OG_CARD
+        + "\n"
+        + JSON_LD
+    )
 
 #: Receiver pages stay out of every index: the URL is a one-time secret and the
 #: page is meaningless to a crawler.
@@ -589,8 +607,21 @@ _TOP: Final = (
 _FOOTER: Final = """  <footer class="foot">
     <a href="/terms">@@footerTerms@@</a>
     <span aria-hidden="true">·</span>
-    <a href="/privacy">@@footerPrivacy@@</a>@@footerGuides@@
+    <a href="/privacy">@@footerPrivacy@@</a>@@footerGuides@@@@langSwitch@@
   </footer>"""
+
+
+def lang_switch(href: str, label: str) -> str:
+    """The visible way to the other language.
+
+    The homepages no longer guess a language from the request header, so this
+    link is how a reader who landed on the wrong one gets across — and how a
+    crawler finds the other version even before it reads the hreflang.
+    """
+    return (
+        '\n    <span aria-hidden="true">·</span>\n'
+        f'    <a href="{href}" hreflang="{"ru" if "/ru" in href else "en"}">{label}</a>'
+    )
 
 #: Quiet entry points into the two landing clusters. Homepage only: the spec
 #: joins the clusters through the homepage, never directly — so no landing,
@@ -1517,6 +1548,7 @@ def _render(
     landing_body: str = "",
     is_landing: bool = False,
     footer_guides: bool = False,
+    lang_switch_html: str = "",
 ) -> str:
     """Fill a page template's ``@@key@@`` tokens and ``var T`` blob for ``lang``.
 
@@ -1548,6 +1580,7 @@ def _render(
     out = out.replace("@@modeRedirect@@", "" if is_landing else _MODE_REDIRECT_SCRIPT)
     out = out.replace("@@isLanding@@", "true" if is_landing else "false")
     out = out.replace("@@footerGuides@@", _FOOTER_GUIDES if footer_guides else "")
+    out = out.replace("@@langSwitch@@", lang_switch_html)
     # The browser needs the same "is this a closed address?" rule the server
     # uses, and one drifting copy of it would silently break the guarantee that
     # a keyless arrival never consumes a throw. So it is injected from the
@@ -1560,8 +1593,21 @@ def _render(
     return out
 
 
+#: Footer label pointing at the other language's homepage.
+_HOME_SWITCH_LABEL: Final = {"en": "Русский", "ru": "English"}
+
+
 def render_sender(lang: str = DEFAULT_LOCALE) -> str:
-    return _render(_SENDER_TMPL, lang, head_meta=_SENDER_HEAD_META, footer_guides=True)
+    other = "ru" if lang == "en" else "en"
+    return _render(
+        _SENDER_TMPL,
+        lang,
+        head_meta=_sender_head_meta(lang),
+        footer_guides=True,
+        lang_switch_html=lang_switch(
+            "/ru/" if other == "ru" else "/", _HOME_SWITCH_LABEL[lang]
+        ),
+    )
 
 
 def render_closed_sender(lang: str = DEFAULT_LOCALE) -> str:
@@ -1575,7 +1621,13 @@ def render_receiver(lang: str = DEFAULT_LOCALE) -> str:
 
 
 def render_landing(
-    *, closed: bool, head_meta: str, strings: dict[str, str], body: str
+    *,
+    closed: bool,
+    head_meta: str,
+    strings: dict[str, str],
+    body: str,
+    lang: str = DEFAULT_LOCALE,
+    lang_switch_html: str = "",
 ) -> str:
     """One SEO landing: the working sender page under a query-shaped headline.
 
@@ -1586,17 +1638,17 @@ def render_landing(
     the CSP is computed from the rendered bytes like everywhere else). What a
     landing deliberately does NOT inherit is the entry-point behaviour: it
     never redirects to the remembered mode and never writes it — it serves
-    the document its URL promised. English only, like the rest of the launch
-    surface.
+    the document its URL promised, in the language that URL belongs to.
     """
     template = _CLOSED_SENDER_TMPL if closed else _SENDER_TMPL
     return _render(
         template,
-        DEFAULT_LOCALE,
+        lang,
         head_meta=head_meta,
         extra=strings,
         landing_body=body,
         is_landing=True,
+        lang_switch_html=lang_switch_html,
     )
 
 

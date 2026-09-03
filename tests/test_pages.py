@@ -203,24 +203,37 @@ def test_render_carries_the_right_copy():
     assert STRINGS["ru"]["modeClosedName"] in render_closed_sender("ru")
 
 
-def test_server_serves_russian_only_when_the_browser_prefers_it():
+def test_each_homepage_language_has_its_own_address():
+    # The indexable homepages do not read Accept-Language: one URL, one
+    # language, always. A homepage that answered in whatever language was
+    # asked for could only ever be indexed in one of them, and the other would
+    # exist unseen — search is the main channel, so the URLs are the split.
     client = TestClient(create_app())
 
-    ru = client.get("/", headers={"Accept-Language": "ru-RU,ru;q=0.9"})
-    assert STRINGS["ru"]["taglineB"] in ru.text
-    assert STRINGS["en"]["taglineB"] not in ru.text
+    for header in ("ru-RU,ru;q=0.9", "en-US,en;q=0.9", ""):
+        en = client.get("/", headers={"Accept-Language": header})
+        assert STRINGS["en"]["taglineB"] in en.text, header
+        assert STRINGS["ru"]["taglineB"] not in en.text, header
 
-    en = client.get("/", headers={"Accept-Language": "en-US,en;q=0.9"})
-    assert STRINGS["en"]["taglineB"] in en.text
-    assert STRINGS["ru"]["taglineB"] not in en.text
+        ru = client.get("/ru/", headers={"Accept-Language": header})
+        assert STRINGS["ru"]["taglineB"] in ru.text, header
+        assert STRINGS["en"]["taglineB"] not in ru.text, header
 
-    # No Accept-Language header at all falls back to the English default.
-    default = client.get("/", headers={"Accept-Language": ""})
-    assert STRINGS["en"]["taglineB"] in default.text
+    # Each names the other, so a reader who landed on the wrong one is one
+    # click away and a crawler finds the pair without guessing.
+    assert 'href="/ru/"' in client.get("/").text
+    assert 'href="/"' in client.get("/ru/").text
 
-    # The receiver page is localised the same way.
+
+def test_pages_that_never_reach_an_index_still_follow_the_browser():
+    # /closed and the receiver pages are noindex working surfaces: no crawler
+    # forms an opinion about them, so answering in the reader's own language
+    # costs nothing and helps.
+    client = TestClient(create_app())
     recv = client.get("/abc-def", headers={"Accept-Language": "ru"})
     assert STRINGS["ru"]["fetching"] in recv.text
+    closed = client.get("/closed", headers={"Accept-Language": "ru"})
+    assert STRINGS["ru"]["taglineB"] in closed.text
 
 
 # --- legal pages (Terms / Privacy) ------------------------------------------
@@ -290,7 +303,7 @@ def test_main_pages_footer_links_to_legal_pages(client):
     assert STRINGS["en"]["footerTerms"] in en
     assert STRINGS["en"]["footerPrivacy"] in en
 
-    ru = client.get("/", headers={"Accept-Language": "ru-RU,ru;q=0.9"}).text
+    ru = client.get("/ru/").text
     assert STRINGS["ru"]["footerTerms"] in ru
     assert STRINGS["ru"]["footerPrivacy"] in ru
 

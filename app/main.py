@@ -48,6 +48,7 @@ from app.pages import (
     closed_sender_page,
     csp_for,
     receiver_page,
+    render_sender,
     sender_page,
 )
 from app.throwstore import OutOfCodes, StoreFull, ThrowStore
@@ -359,7 +360,7 @@ _SAFE_LOG_PATHS = frozenset(
         "/api/pro-interest",
         "/api/feedback",
     }
-) | {f"/{slug}" for slug in LANDING_PAGES}
+) | set(LANDING_PAGES) | {"/ru/"}
 
 
 def code_pseudonym(code: str, secret: bytes | None = None) -> str:
@@ -767,10 +768,16 @@ def create_app(
         return HTMLResponse(html, headers=headers)
 
     @app.get("/", response_class=HTMLResponse)
-    async def get_sender_page(request: Request) -> HTMLResponse:
-        # Locale (EN default, RU when the browser prefers it) is decided from
-        # Accept-Language; the page is otherwise identical for everyone.
-        return page(sender_page(request.headers.get("accept-language")), localised=True)
+    async def get_sender_page() -> HTMLResponse:
+        # English, for everyone, always. The Russian homepage is /ru/ — its own
+        # URL, named from here by hreflang and by a link in the footer. Guessing
+        # the language from Accept-Language would leave whichever version the
+        # crawler did not ask for unindexed, and search is the main channel.
+        return page(render_sender("en"))
+
+    @app.get("/ru/", response_class=HTMLResponse)
+    async def get_ru_sender_page() -> HTMLResponse:
+        return page(render_sender("ru"))
 
     # Static legal pages, English-only (see app.pages). Registered before the
     # ``/{code}`` catch-all so those words never resolve as receiver codes.
@@ -808,8 +815,8 @@ def create_app(
 
         return serve_landing
 
-    for slug, html in LANDING_PAGES.items():
-        app.get(f"/{slug}", response_class=HTMLResponse)(_landing_endpoint(html))
+    for path, html in LANDING_PAGES.items():
+        app.get(path, response_class=HTMLResponse)(_landing_endpoint(html))
 
     @app.get("/{code}", response_class=HTMLResponse)
     async def get_receiver_page(code: str, request: Request) -> HTMLResponse:
