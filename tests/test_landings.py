@@ -237,6 +237,16 @@ def test_legal_pages_are_not_link_graph_dead_ends(client):
         assert 'href="/one-time-secret"' in body, path
 
 
+def test_localised_pages_admit_that_they_vary(client):
+    # The homepage picks its language from Accept-Language, so one URL has two
+    # bodies. A cache that isn't told this hands the Russian page to an English
+    # reader. EN-only pages must NOT claim to vary — that only splits caches.
+    assert client.get("/").headers["Vary"] == "Accept-Language"
+    assert client.get("/closed").headers["Vary"] == "Accept-Language"
+    for path in ("/terms", "/send-text-from-pc-to-phone", "/one-time-secret"):
+        assert "Vary" not in client.get(path).headers, path
+
+
 def test_sitemap_dates_every_url():
     assert SITEMAP_XML.count("<lastmod>") == len(INDEXABLE_PATHS)
 

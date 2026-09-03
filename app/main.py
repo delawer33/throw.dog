@@ -749,19 +749,28 @@ def create_app(
         log_event("feedback", "-")
         return JSONResponse({"ok": True}, status_code=201)
 
-    def page(html: str) -> HTMLResponse:
+    def page(html: str, *, localised: bool = False) -> HTMLResponse:
         """Serve a page under a policy computed from that exact page.
 
         The hashes in the policy come from the bytes below it, so a change to
         the inline JS can never leave a stale allow-list behind (see app.csp).
+
+        ``localised`` marks the pages whose body is chosen by Accept-Language.
+        They must say so: a cache told nothing assumes one URL is one
+        document, and would happily hand the Russian page to an English
+        reader. The EN-only pages (legal, every SEO landing) stay unmarked —
+        claiming to vary when nothing varies just fragments caching.
         """
-        return HTMLResponse(html, headers={"Content-Security-Policy": csp_for(html)})
+        headers = {"Content-Security-Policy": csp_for(html)}
+        if localised:
+            headers["Vary"] = "Accept-Language"
+        return HTMLResponse(html, headers=headers)
 
     @app.get("/", response_class=HTMLResponse)
     async def get_sender_page(request: Request) -> HTMLResponse:
         # Locale (EN default, RU when the browser prefers it) is decided from
         # Accept-Language; the page is otherwise identical for everyone.
-        return page(sender_page(request.headers.get("accept-language")))
+        return page(sender_page(request.headers.get("accept-language")), localised=True)
 
     # Static legal pages, English-only (see app.pages). Registered before the
     # ``/{code}`` catch-all so those words never resolve as receiver codes.
@@ -784,7 +793,9 @@ def create_app(
     # the legal pages, so the word never resolves as a throw address.
     @app.get("/closed", response_class=HTMLResponse)
     async def get_closed_sender_page(request: Request) -> HTMLResponse:
-        return page(closed_sender_page(request.headers.get("accept-language")))
+        return page(
+            closed_sender_page(request.headers.get("accept-language")), localised=True
+        )
 
     # SEO landings: static English documents, one route per slug, registered
     # before the ``/{code}`` catch-all like every other named page. Each is
@@ -804,7 +815,9 @@ def create_app(
     async def get_receiver_page(code: str, request: Request) -> HTMLResponse:
         # Same shell for every code, valid or not: the page reveals nothing,
         # and only its POST can consume a throw.
-        return page(receiver_page(request.headers.get("accept-language")))
+        return page(
+            receiver_page(request.headers.get("accept-language")), localised=True
+        )
 
     return app
 
