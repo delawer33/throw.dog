@@ -1,6 +1,6 @@
 import pytest
 
-from app.gatekeeper import Gatekeeper, ReadOutcome
+from app.gatekeeper import Gatekeeper, ReadOutcome, UploadLimiter
 
 
 class FakeClock:
@@ -157,3 +157,79 @@ def test_active_ip_buckets_survive_a_sweep():
 def test_nonsense_configuration_is_refused(kwargs):
     with pytest.raises(ValueError):
         Gatekeeper(**kwargs)
+
+
+# --- the upload limiter -----------------------------------------------------
+#
+# A second brake, deliberately not sharing a counter with the miss budget above:
+# guessing codes and filling the disk are different attacks by different people,
+# and one must never spend the other's budget (ADR 0005).
+
+
+def test_one_ip_may_only_have_so_many_uploads_in_flight():
+    limiter = UploadLimiter(max_concurrent=2, clock=FakeClock())
+
+    assert limiter.start("1.2.3.4", 10) is True
+    assert limiter.start("1.2.3.4", 10) is True
+    assert limiter.start("1.2.3.4", 10) is False
+
+
+def test_finishing_an_upload_gives_the_slot_back():
+    limiter = UploadLimiter(max_concurrent=1, clock=FakeClock())
+    limiter.start("1.2.3.4", 10)
+
+    assert limiter.start("1.2.3.4", 10) is False
+    limiter.finish("1.2.3.4")
+    assert limiter.start("1.2.3.4", 10) is True
+
+
+def test_declared_bytes_are_capped_per_window_even_when_slots_are_free():
+    clock = FakeClock()
+    limiter = UploadLimiter(
+        max_concurrent=100, max_bytes_per_window=1000, window_seconds=60, clock=clock
+    )
+
+    assert limiter.start("1.2.3.4", 1000) is True
+    limiter.finish("1.2.3.4")
+    assert limiter.start("1.2.3.4", 1) is False, "finishing fast buys no more room"
+
+    clock.advance(61)
+    assert limiter.start("1.2.3.4", 1000) is True
+
+
+def test_a_refused_upload_costs_the_ip_nothing():
+    limiter = UploadLimiter(max_concurrent=100, max_bytes_per_window=1000, clock=FakeClock())
+
+    assert limiter.start("1.2.3.4", 2000) is False
+    assert limiter.start("1.2.3.4", 1000) is True, "the refusal reserved nothing"
+
+
+def test_a_slot_nobody_closes_ages_out_rather_than_banning_the_ip():
+    clock = FakeClock()
+    limiter = UploadLimiter(
+        max_concurrent=1, max_bytes_per_window=10**9, slot_ttl_seconds=120, clock=clock
+    )
+    limiter.start("1.2.3.4", 10)
+
+    assert limiter.start("1.2.3.4", 10) is False
+    clock.advance(121)
+    assert limiter.start("1.2.3.4", 10) is True
+
+
+def test_each_ip_gets_its_own_budget():
+    limiter = UploadLimiter(max_concurrent=1, clock=FakeClock())
+    assert limiter.start("1.2.3.4", 10) is True
+    assert limiter.start("5.6.7.8", 10) is True
+
+
+def test_a_spray_of_one_shot_ips_does_not_grow_the_maps_forever():
+    clock = FakeClock()
+    limiter = UploadLimiter(max_tracked_ips=8, window_seconds=60, slot_ttl_seconds=60, clock=clock)
+    for n in range(50):
+        limiter.start(f"10.0.0.{n}", 1)
+        limiter.finish(f"10.0.0.{n}")
+
+    clock.advance(61)
+    limiter.start("1.2.3.4", 1)
+
+    assert len(limiter._declared) <= 9

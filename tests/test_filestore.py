@@ -50,7 +50,7 @@ def upload(store: FileStore, payload: bytes, chunk_size: int = 8, **kwargs) -> s
     upload_id = store.begin(size=len(payload), chunks=len(chunks), **kwargs)
     for index, chunk in enumerate(chunks):
         store.write_chunk(upload_id, index, chunk)
-    return store.finish(upload_id)
+    return store.finish(upload_id).code
 
 
 # --- the round trip ---------------------------------------------------------

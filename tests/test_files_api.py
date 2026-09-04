@@ -29,6 +29,22 @@ def client(tmp_path):
         yield test_client
 
 
+@pytest.fixture()
+def limited():
+    """A client whose upload limiter is tighter than production's."""
+    from contextlib import ExitStack
+
+    from app.gatekeeper import UploadLimiter
+
+    with ExitStack() as stack:
+
+        def build(**kwargs):
+            app = create_app(TEST_SETTINGS, upload_limiter=UploadLimiter(**kwargs))
+            return stack.enter_context(TestClient(app))
+
+        yield build
+
+
 def put_file(client, payload: bytes, *, chunk_size: int = 8, **kwargs) -> str:
     """Land a file in the store directly and return the code addressing it.
 
@@ -40,7 +56,7 @@ def put_file(client, payload: bytes, *, chunk_size: int = 8, **kwargs) -> str:
     upload = store.begin(size=len(payload), chunks=len(chunks), **kwargs)
     for index, chunk in enumerate(chunks):
         store.write_chunk(upload, index, chunk)
-    return store.finish(upload)
+    return store.finish(upload).code
 
 
 def take(client, code: str):
@@ -256,3 +272,246 @@ def test_an_upload_id_never_reaches_the_access_log_but_the_chunk_number_does():
     redacted = sanitize_log_path(f"/api/files/{upload}/7")
     assert upload not in redacted
     assert redacted.endswith("/7")
+
+
+# --- the upload -------------------------------------------------------------
+
+
+def send(client, payload: bytes, *, pieces: list[bytes] | None = None, **fields):
+    """Push ``payload`` through the three upload handles. Returns the code.
+
+    ``pieces`` spells the chunking out where it is not the plain open-mode one
+    — a closed upload leads with its sealed header, so its pieces are not just
+    the file cut into equal parts.
+    """
+    from app.filestore import CHUNK_BYTES
+
+    if pieces is None:
+        pieces = [
+            payload[i : i + CHUNK_BYTES] for i in range(0, max(1, len(payload)), CHUNK_BYTES)
+        ]
+    fields.setdefault("size", len(payload))
+    fields.setdefault("chunks", len(pieces))
+    started = client.post("/api/files", json=fields)
+    assert started.status_code == 201, started.text
+    upload = started.json()["upload"]
+    for index, piece in enumerate(pieces):
+        assert client.put(f"/api/files/{upload}/{index}", content=piece).status_code == 204
+    done = client.post(f"/api/files/{upload}/done")
+    assert done.status_code == 201, done.text
+    return done.json()["code"]
+
+
+def test_a_file_uploaded_in_chunks_comes_back_whole(client):
+    payload = bytes(range(256)) * 40
+    code = send(client, payload, name="dump.bin", mime="application/octet-stream")
+
+    body = take(client, code).json()
+    assert body["size"] == len(payload)
+    assert client.get(body["url"]).content == payload
+
+
+def test_no_address_exists_until_the_file_has_fully_arrived(client):
+    started = client.post("/api/files", json={"size": 8, "chunks": 1})
+    upload = started.json()["upload"]
+
+    assert take(client, upload).status_code == 404
+    assert client.post(f"/api/files/{upload}/done").status_code == 400, "nothing arrived"
+
+
+def test_an_oversized_open_file_is_refused_before_a_byte_of_it_arrives(client):
+    from app.main import DEFAULT_OPEN_FILE_MAX_BYTES
+
+    over = DEFAULT_OPEN_FILE_MAX_BYTES + 1
+    refused = client.post("/api/files", json={"size": over, "chunks": 7})
+
+    assert refused.status_code == 413
+    assert str(DEFAULT_OPEN_FILE_MAX_BYTES) in refused.json()["detail"]
+    assert client.app.state.files.total_bytes() == 0, "nothing was reserved"
+
+
+def test_the_closed_mode_is_allowed_more_because_we_cannot_read_it(client):
+    from app.main import (
+        DEFAULT_CLOSED_FILE_MAX_BYTES,
+        DEFAULT_OPEN_FILE_MAX_BYTES,
+        chunks_for,
+        closed_file_ceiling,
+    )
+
+    plain = DEFAULT_OPEN_FILE_MAX_BYTES + 1
+    data_chunks = chunks_for(plain)
+    accepted = client.post(
+        "/api/files",
+        json={
+            "enc": "aes-gcm-file-v1",
+            "plain": plain,
+            "size": closed_file_ceiling(plain, data_chunks),
+            "chunks": data_chunks + 1,
+        },
+    )
+    assert accepted.status_code == 201, "over the open plank, under the closed one"
+
+    over = DEFAULT_CLOSED_FILE_MAX_BYTES + 1
+    refused = client.post(
+        "/api/files",
+        json={
+            "enc": "aes-gcm-file-v1",
+            "plain": over,
+            "size": over,
+            "chunks": chunks_for(over) + 1,
+        },
+    )
+    assert refused.status_code == 413
+    assert str(DEFAULT_CLOSED_FILE_MAX_BYTES) in refused.json()["detail"]
+
+
+def test_a_closed_sender_cannot_smuggle_extra_bytes_past_the_limit(client):
+    from app.main import chunks_for, closed_file_ceiling
+
+    plain = 1024
+    data_chunks = chunks_for(plain)
+    inflated = closed_file_ceiling(plain, data_chunks) + 1
+
+    refused = client.post(
+        "/api/files",
+        json={
+            "enc": "aes-gcm-file-v1",
+            "plain": plain,
+            "size": inflated,
+            "chunks": data_chunks + 1,
+        },
+    )
+    assert refused.status_code == 400
+
+
+def test_an_unknown_file_encryption_scheme_is_refused(client):
+    refused = client.post(
+        "/api/files", json={"enc": "rot13", "size": 8, "chunks": 1, "plain": 8}
+    )
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == "unknown encryption scheme"
+
+
+def test_a_closed_file_keeps_no_name_even_when_one_is_offered(client):
+    """A file's name is content; in the closed mode we do not get to have it."""
+    from app.main import chunks_for, closed_file_ceiling
+
+    plain = 16
+    size = closed_file_ceiling(plain, chunks_for(plain))
+    header, sealed = b"h" * (size - plain - 16), b"c" * (plain + 16)
+    code = send(
+        client,
+        b"",
+        pieces=[header, sealed],
+        enc="aes-gcm-file-v1",
+        plain=plain,
+        size=size,
+        chunks=chunks_for(plain) + 1,
+        name="leaked.txt",
+        mime="text/plain",
+    )
+
+    body = take(client, code).json()
+    assert body["enc"] == "aes-gcm-file-v1"
+    assert "name" not in body
+    assert "mime" not in body
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"size": 0, "chunks": 1},
+        {"size": -5, "chunks": 1},
+        {"size": "8", "chunks": 1},
+        {"size": 8, "chunks": 0},
+        {"size": 8, "chunks": 4},  # not the fixed chunking
+        {"size": True, "chunks": 1},
+    ],
+)
+def test_absurd_upload_metadata_is_refused(client, payload):
+    assert client.post("/api/files", json=payload).status_code == 400
+
+
+def test_chunks_must_arrive_in_order(client):
+    started = client.post("/api/files", json={"size": 8, "chunks": 1}).json()
+    upload = started["upload"]
+
+    assert client.put(f"/api/files/{upload}/1", content=b"abcdefgh").status_code == 400
+    assert client.put(f"/api/files/{upload}/0", content=b"abcdefgh").status_code == 204
+
+
+def test_a_chunk_for_an_unknown_upload_looks_like_any_other_miss(client):
+    response = client.put("/api/files/2abcdefghijkmn/0", content=b"x")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "no such throw"}
+
+
+def test_more_bytes_than_declared_are_refused(client):
+    upload = client.post("/api/files", json={"size": 4, "chunks": 1}).json()["upload"]
+    assert client.put(f"/api/files/{upload}/0", content=b"far too long").status_code == 400
+
+
+def test_a_filename_is_reduced_to_a_bare_name(client):
+    code = send(client, b"payload", name="../../etc/passwd")
+    assert take(client, code).json()["name"] == "passwd"
+
+
+def test_a_junk_mime_is_dropped_rather_than_echoed(client):
+    code = send(client, b"payload", name="x.bin", mime="not a mime type")
+    assert "mime" not in take(client, code).json()
+
+
+def test_the_upload_limit_holds_the_disk_without_touching_the_read_path(limited):
+    client = limited(max_concurrent=2, max_bytes_per_window=10**9)
+    first = client.post("/api/files", json={"size": 1024, "chunks": 1})
+    second = client.post("/api/files", json={"size": 1024, "chunks": 1})
+    third = client.post("/api/files", json={"size": 1024, "chunks": 1})
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert third.status_code == 429
+    assert client.app.state.files.total_bytes() == 2048, "the refused one reserved nothing"
+
+    # The read path is untouched: an honest receiver behind the same NAT still
+    # reads their throw, and a miss is still a miss.
+    text = client.post("/api/throws", json={"text": "unaffected"}).json()["code"]
+    assert take(client, text).json() == {"text": "unaffected"}
+    assert take(client, "red-fox").status_code == 404
+
+
+def test_a_finished_upload_gives_its_slot_back(limited):
+    client = limited(max_concurrent=1, max_bytes_per_window=10**9)
+    send(client, b"first")
+    assert send(client, b"second"), "the slot came back with the finished upload"
+
+
+def test_a_done_on_an_unknown_upload_hands_out_no_slot(limited):
+    client = limited(max_concurrent=1, max_bytes_per_window=10**9)
+    assert client.post("/api/files", json={"size": 8, "chunks": 1}).status_code == 201
+    assert client.post("/api/files/2abcdefghijkmn/done").status_code == 404
+    assert client.post("/api/files", json={"size": 8, "chunks": 1}).status_code == 429
+
+
+def test_the_bytes_per_minute_limit_stops_a_flood_of_reservations(limited):
+    client = limited(max_concurrent=100, max_bytes_per_window=4096)
+    assert client.post("/api/files", json={"size": 4096, "chunks": 1}).status_code == 201
+    assert client.post("/api/files", json={"size": 1, "chunks": 1}).status_code == 429
+
+
+def test_a_full_disk_answers_busy_rather_than_failing(tmp_path):
+    store = FileStore(tmp_path / "throws", max_total_bytes=1024)
+    with TestClient(create_app(TEST_SETTINGS, files=store)) as client:
+        assert client.post("/api/files", json={"size": 1024, "chunks": 1}).status_code == 201
+        busy = client.post("/api/files", json={"size": 1024, "chunks": 1})
+
+    assert busy.status_code == 503
+    assert "busy" in busy.json()["detail"]
+
+
+def test_a_file_creation_is_logged_by_shape_never_by_name(client, capsys):
+    capsys.readouterr()
+    send(client, b"x" * 50, name="passport-scan.pdf")
+
+    line = capsys.readouterr().out.strip()
+    assert "event=created" in line and "kind=file" in line and "mode=open" in line
+    assert "passport" not in line

@@ -43,16 +43,21 @@ from app.filestore import (
     UploadIncomplete,
 )
 from app.filestore import CHUNK_BYTES as FILE_CHUNK_BYTES
+from app.filestore import MAX_CHUNK_BYTES as _MAX_CHUNK_BODY
 from app.filestore import OutOfCodes as FilesOutOfCodes
 from app.filestore import StoreFull as FilesStoreFull
 from app.gatekeeper import (
     DEFAULT_GLOBAL_MISS_THRESHOLD,
     DEFAULT_GLOBAL_WINDOW_SECONDS,
+    DEFAULT_MAX_CONCURRENT_UPLOADS,
     DEFAULT_MAX_TRACKED_IPS,
     DEFAULT_MISS_BUDGET,
+    DEFAULT_UPLOAD_BYTES_PER_WINDOW,
+    DEFAULT_UPLOAD_WINDOW_SECONDS,
     DEFAULT_WINDOW_SECONDS,
     Gatekeeper,
     ReadOutcome,
+    UploadLimiter,
 )
 from app.landings import INDEXABLE_PATHS, LANDING_PAGES, SITEMAP_XML
 from app.pages import (
@@ -233,6 +238,47 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | None | objec
     return start, min(end, size - 1)
 
 
+#: The most of a filename we keep. Long enough for any real name, short enough
+#: that the metadata of a throw cannot become a payload of its own.
+MAX_FILENAME_LEN = 255
+
+#: The most of a declared MIME type we keep. It is a hint for the receiving
+#: page and nothing else — the bytes always go out as ``octet-stream``.
+_MAX_MIME_LEN = 128
+
+
+def clean_filename(raw: object) -> str | None:
+    """The sender's filename reduced to something safe to store and echo back.
+
+    Path separators and control characters go: the name is shown to a receiver
+    and put in a header, and it arrived from a stranger. What is left is a bare
+    name, never a path — we do not create a file by this name anyway (the bytes
+    live under a digest), so nothing here can escape a directory. It is the
+    receiver's browser we are protecting.
+    """
+    if not isinstance(raw, str):
+        return None
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(char for char in name if char.isprintable()).strip()
+    name = name.strip(".")
+    if not name:
+        return None
+    return name[:MAX_FILENAME_LEN]
+
+
+def clean_mime(raw: object) -> str | None:
+    """The declared MIME type, if it looks like one. A hint, never a promise."""
+    if not isinstance(raw, str):
+        return None
+    mime = raw.strip().lower()
+    if not mime or len(mime) > _MAX_MIME_LEN or "/" not in mime:
+        return None
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789!#$&^_.+-/")
+    if not set(mime) <= allowed:
+        return None
+    return mime
+
+
 def content_disposition(name: str | None) -> str:
     """An ``attachment`` header for ``name``, safe to put in a header.
 
@@ -281,6 +327,49 @@ def _stream_file(files, ticket: str, held, start: int, end: int):
         files.complete(ticket)
 
 
+# --- closed files: the format, and what it costs in bytes -------------------
+
+#: The one file encryption format we carry, and a different version string from
+#: the text one because the layout is different: a 100 MB file cannot be one
+#: ``encrypt`` call (it would put a phone on the floor), so it is a sequence of
+#: independently sealed chunks. An unrecognised version means the two ends
+#: disagree about the bytes, and a wrongly-read file is worse than a refusal.
+ENC_FILE_SCHEME = "aes-gcm-file-v1"
+
+#: Bytes of preamble before the first sealed chunk: the 4-byte random IV prefix
+#: for the session, and a 4-byte length for the sealed header that follows.
+_FILE_PREAMBLE_BYTES = 8
+
+#: The most the sealed header (the JSON with name, mime and size) may weigh.
+#: It is metadata, not content: a filename that needs four kilobytes is not a
+#: filename, and without a cap the header would be a way to store payload
+#: outside the size the sender was held to.
+MAX_ENCRYPTED_HEADER_BYTES = 4096
+
+
+def closed_file_ceiling(plaintext_bytes: int, chunks: int) -> int:
+    """The most a closed file of ``plaintext_bytes`` may weigh on the wire.
+
+    Same job as :func:`encrypted_ceiling` does for text, and the same reason:
+    the limit the sender sees is a limit on their file, not on our packaging,
+    so we do the arithmetic and they never learn that a GCM tag exists.
+
+    ``chunks`` counts the sealed data chunks (the header is extra). Each one
+    costs its tag; the preamble and the header are the fixed part.
+    """
+    return (
+        _FILE_PREAMBLE_BYTES
+        + MAX_ENCRYPTED_HEADER_BYTES
+        + plaintext_bytes
+        + chunks * _GCM_TAG_BYTES
+    )
+
+
+def chunks_for(plaintext_bytes: int) -> int:
+    """How many fixed-size chunks a file of this size is cut into."""
+    return max(1, -(-plaintext_bytes // FILE_CHUNK_BYTES))
+
+
 #: One body for every kind of miss — never existed, expired, already read.
 #: Telling them apart would turn code-guessing into a search with feedback.
 MISS_BODY = {"detail": "no such throw"}
@@ -324,6 +413,10 @@ class Settings:
     #: Size ceilings per mode, in the plaintext bytes the sender chose.
     open_file_max_bytes: int = DEFAULT_OPEN_FILE_MAX_BYTES
     closed_file_max_bytes: int = DEFAULT_CLOSED_FILE_MAX_BYTES
+    #: The upload brake: its own counter, never the read path's miss budget.
+    upload_max_concurrent: int = DEFAULT_MAX_CONCURRENT_UPLOADS
+    upload_window_seconds: float = DEFAULT_UPLOAD_WINDOW_SECONDS
+    upload_bytes_per_window: int = DEFAULT_UPLOAD_BYTES_PER_WINDOW
     #: File the Pro fake-door appends interested emails to (one per line).
     pro_emails_path: str = DEFAULT_PRO_EMAILS_PATH
     #: File the feedback wish-box appends to (one line per record).
@@ -361,6 +454,17 @@ class Settings:
                 source.get("THROW_GATE_MAX_TRACKED_IPS", DEFAULT_MAX_TRACKED_IPS)
             ),
             files_dir=source.get("THROW_FILES_DIR"),
+            upload_max_concurrent=int(
+                source.get("THROW_UPLOAD_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT_UPLOADS)
+            ),
+            upload_window_seconds=float(
+                source.get("THROW_UPLOAD_WINDOW_SECONDS", DEFAULT_UPLOAD_WINDOW_SECONDS)
+            ),
+            upload_bytes_per_window=int(
+                source.get(
+                    "THROW_UPLOAD_BYTES_PER_WINDOW", DEFAULT_UPLOAD_BYTES_PER_WINDOW
+                )
+            ),
             open_file_max_bytes=int(
                 source.get("THROW_OPEN_FILE_MAX_BYTES", DEFAULT_OPEN_FILE_MAX_BYTES)
             ),
@@ -675,6 +779,7 @@ def create_app(
     store: ThrowStore | None = None,
     gatekeeper: Gatekeeper | None = None,
     files: FileStore | None = None,
+    upload_limiter: UploadLimiter | None = None,
 ) -> FastAPI:
     config = settings or Settings.from_env()
     # Point the module-level pseudonym key (used by log_event and, crucially, the
@@ -690,6 +795,11 @@ def create_app(
     # hand out a code the other is already using.
     throws.set_reserved(file_throws.holds)
     file_throws.set_reserved(throws.holds)
+    uploads = upload_limiter or UploadLimiter(
+        max_concurrent=config.upload_max_concurrent,
+        window_seconds=config.upload_window_seconds,
+        max_bytes_per_window=config.upload_bytes_per_window,
+    )
     gate = gatekeeper or Gatekeeper(
         window_seconds=config.gate_window_seconds,
         miss_budget=config.gate_miss_budget,
@@ -741,6 +851,7 @@ def create_app(
     app.state.store = throws
     app.state.files = file_throws
     app.state.gatekeeper = gate
+    app.state.uploads = uploads
 
     # Public launch: the homepage, legal pages and SEO landings ARE indexable;
     # everything else — receiver /{code} pages (one-time secrets) and the API —
@@ -944,6 +1055,159 @@ def create_app(
         gate.record(ip, ReadOutcome.MISS)
         tarpitted = not gate.allow(ip)
         return await miss(tarpitted=tarpitted)
+
+    def file_too_big(limit: int, size: int) -> JSONResponse:
+        # The number in the message is the sender's own: the size of the file
+        # they picked, against the limit for the mode they picked. Neither is
+        # in our packaging units — a closed sender must never learn about GCM
+        # tags from an error about a file that looked well inside the limit.
+        return JSONResponse(
+            {"detail": f"file is too big: {size} bytes, limit is {limit}"},
+            status_code=413,
+        )
+
+    @app.post("/api/files")
+    async def start_upload(request: Request) -> JSONResponse:
+        # Everything is decided here, before a single byte of the file is
+        # allowed to arrive: the mode's ceiling, the shape of the chunking and
+        # this IP's share of the disk. A 100 MB body that gets refused after
+        # the fact has already cost us the 100 MB.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > _PRO_BODY_MAX_BYTES:
+                return JSONResponse({"detail": "request too large"}, status_code=413)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return JSONResponse({"detail": "malformed request"}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({"detail": "malformed request"}, status_code=400)
+
+        scheme = payload.get("enc")
+        if scheme is not None and scheme != ENC_FILE_SCHEME:
+            return JSONResponse({"detail": "unknown encryption scheme"}, status_code=400)
+        encrypted = scheme is not None
+
+        size = payload.get("size")
+        chunks = payload.get("chunks")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            return JSONResponse({"detail": "size must be a positive integer"}, status_code=400)
+        if not isinstance(chunks, int) or isinstance(chunks, bool) or chunks < 1:
+            return JSONResponse({"detail": "chunks must be a positive integer"}, status_code=400)
+
+        if encrypted:
+            # ``size`` is what will travel; ``plain`` is the file the sender
+            # actually chose, and it is the only thing the limit is about. Both
+            # are checked, because trusting only the first would make the limit
+            # two limits: a client could inflate the packaging and store more
+            # than the number on the page allows.
+            plain = payload.get("plain")
+            if not isinstance(plain, int) or isinstance(plain, bool) or plain < 1:
+                return JSONResponse(
+                    {"detail": "plain must be a positive integer"}, status_code=400
+                )
+            if plain > config.closed_file_max_bytes:
+                return file_too_big(config.closed_file_max_bytes, plain)
+            data_chunks = chunks_for(plain)
+            if chunks != data_chunks + 1:
+                # One sealed chunk per fixed-size piece, plus the sealed header.
+                return JSONResponse({"detail": "chunk count does not match"}, status_code=400)
+            if size > closed_file_ceiling(plain, data_chunks):
+                return JSONResponse({"detail": "declared size does not match"}, status_code=400)
+            name = mime = None
+        else:
+            if size > config.open_file_max_bytes:
+                return file_too_big(config.open_file_max_bytes, size)
+            if chunks != chunks_for(size):
+                return JSONResponse({"detail": "chunk count does not match"}, status_code=400)
+            # Only an open throw has a name to give us. In the closed mode the
+            # name is inside the ciphertext, where it belongs: what a file is
+            # called is content, and we do not get to know it.
+            name = clean_filename(payload.get("name"))
+            mime = clean_mime(payload.get("mime"))
+
+        ip = client_ip(request, config)
+        if not uploads.start(ip, size):
+            # Its own counter, never the read path's miss budget: an honest
+            # receiver behind the same NAT must not pay for this.
+            return JSONResponse(
+                {"detail": "too many uploads from here, try again in a minute"},
+                status_code=429,
+            )
+        try:
+            upload = file_throws.begin(
+                size=size,
+                chunks=chunks,
+                encrypted=encrypted,
+                name=name,
+                mime=mime,
+                enc=scheme,
+            )
+        except FilesStoreFull:
+            uploads.finish(ip)
+            return JSONResponse(
+                {"detail": "service is busy, try again in a minute"}, status_code=503
+            )
+        except (ValueError, OSError):
+            uploads.finish(ip)
+            return JSONResponse({"detail": "malformed request"}, status_code=400)
+        return JSONResponse(
+            {"upload": upload, "chunk": FILE_CHUNK_BYTES}, status_code=201
+        )
+
+    @app.put("/api/files/{upload}/{index}")
+    async def put_chunk(upload: str, index: int, request: Request) -> Response:
+        declared = request.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > _MAX_CHUNK_BODY:
+            return JSONResponse({"detail": "chunk is too big"}, status_code=413)
+        body = bytearray()
+        async for piece in request.stream():
+            body.extend(piece)
+            if len(body) > _MAX_CHUNK_BODY:
+                return JSONResponse({"detail": "chunk is too big"}, status_code=413)
+        try:
+            await asyncio.to_thread(
+                file_throws.write_chunk, upload, index, bytes(body)
+            )
+        except NoSuchUpload:
+            return JSONResponse(MISS_BODY, status_code=404)
+        except BadChunk as bad:
+            return JSONResponse({"detail": str(bad)}, status_code=400)
+        except OSError:
+            return JSONResponse(
+                {"detail": "could not store the chunk, try again"}, status_code=503
+            )
+        return Response(status_code=204)
+
+    @app.post("/api/files/{upload}/done")
+    async def finish_upload(upload: str, request: Request) -> JSONResponse:
+        # Only here does the throw become addressable, and only here does the
+        # TTL start. Ten minutes measured from the first byte would mean a
+        # 100 MB file arriving already half dead.
+        try:
+            filed = file_throws.finish(upload)
+        except NoSuchUpload:
+            return JSONResponse(MISS_BODY, status_code=404)
+        except UploadIncomplete as short:
+            return JSONResponse({"detail": str(short)}, status_code=400)
+        except FilesOutOfCodes:
+            return JSONResponse(
+                {"detail": "service is busy, try again in a minute"}, status_code=503
+            )
+        # The slot is released only by an upload that actually finished. A
+        # ``done`` on an id we never issued must not hand anyone a free slot,
+        # and an upload that is still short is still in flight. A slot nobody
+        # ever closes ages out on the limiter's own timer.
+        uploads.finish(client_ip(request, config))
+        log_event(
+            "created",
+            filed.code,
+            encrypted=filed.encrypted,
+            kind="file",
+            size=filed.size,
+        )
+        return JSONResponse({"code": filed.code}, status_code=201)
 
     @app.get("/api/files/t/{ticket}")
     async def download_file(ticket: str, request: Request) -> Response:

@@ -108,6 +108,19 @@ class Grant(NamedTuple):
     enc: str | None
 
 
+class Filed(NamedTuple):
+    """A finished upload: the address it answers to, and what it turned out to be.
+
+    The size and mode come back with the code because the caller has to
+    journal them and must not have to ask the store a second question about a
+    throw that, by then, someone may already have taken.
+    """
+
+    code: str
+    size: int
+    encrypted: bool
+
+
 class Checkout(NamedTuple):
     """An open ticket: where the bytes are and how many of them there are."""
 
@@ -331,7 +344,7 @@ class FileStore:
                 upload.touched_at = self._clock()
                 return upload.received_bytes
 
-    def finish(self, upload_id: str) -> str:
+    def finish(self, upload_id: str) -> Filed:
         """Turn a completed upload into a live throw and return its address.
 
         This is where the throw is born and where the TTL starts — measured
@@ -363,7 +376,11 @@ class FileStore:
                     enc=upload.enc,
                     expires_at=expires_at,
                 )
-                return code
+                return Filed(
+                    code=code,
+                    size=upload.declared_size,
+                    encrypted=upload.encrypted,
+                )
         raise OutOfCodes("could not find an unused code")
 
     def abandon(self, upload_id: str) -> bool:

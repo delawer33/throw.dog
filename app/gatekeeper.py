@@ -1,4 +1,8 @@
-"""Admission control for the read path — pure logic, no I/O.
+"""Admission control — pure logic, no I/O.
+
+Two independent brakes live here: the gate on the *read* path, which slows
+down code-guessing, and the limiter on the *upload* path, which stops one
+source filling the disk. They share a file and a style, never a counter.
 
 The code space is a lottery a bot can brute-force: without a gate, a scraper
 walks the whole space inside one TTL and passively collects other people's
@@ -154,3 +158,142 @@ class Gatekeeper:
         misses = self._global_misses
         while misses and misses[0] <= cutoff:
             misses.popleft()
+
+
+DEFAULT_MAX_CONCURRENT_UPLOADS: int = 2
+DEFAULT_UPLOAD_WINDOW_SECONDS: float = 60.0
+DEFAULT_UPLOAD_BYTES_PER_WINDOW: int = 200 * 1024 * 1024
+
+
+class UploadLimiter:
+    """Decides whether an IP may start another upload. Pure logic, no I/O.
+
+    A deliberately separate counter from the miss budget above, and not a
+    reuse of it. The two brakes answer different questions: the miss budget
+    asks "is this IP guessing codes?", this asks "is this IP filling our
+    disk?". An honest sender who mistypes a code has nothing to do with an
+    abuser who floods uploads, and folding them together would let each
+    punish the other's user (see ADR 0005 — filling the disk is the new
+    vector files bring, and the limit for it was never optional).
+
+    Two brakes again, and both are about the disk rather than about guessing:
+
+    * **Concurrency.** How many uploads one IP may have in flight. A person
+      throws one file at a time; a script opens hundreds and holds a reserved
+      gigabyte each.
+    * **Bytes per window.** How much one IP may *declare* per minute. Charged
+      when the upload starts, not when the bytes land, because a reservation
+      is what occupies the disk ceiling.
+
+    A slot that nobody ever finishes ages out on its own: the store sweeps a
+    stalled upload on a similar timer, and a slot leaking forever would turn
+    one dropped connection into a permanent ban.
+
+    Args:
+        max_concurrent: uploads one IP may have in flight at once.
+        window_seconds: length of the sliding byte window.
+        max_bytes_per_window: declared bytes one IP may start inside it.
+        slot_ttl_seconds: how long an unfinished slot is counted before it is
+            assumed dead. Keep it at or above the store's upload idle window.
+        max_tracked_ips: soft ceiling on IPs held, swept like the gate's.
+        clock: seconds as a float; monotonic by default.
+    """
+
+    def __init__(
+        self,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_UPLOADS,
+        window_seconds: float = DEFAULT_UPLOAD_WINDOW_SECONDS,
+        max_bytes_per_window: int = DEFAULT_UPLOAD_BYTES_PER_WINDOW,
+        slot_ttl_seconds: float = 120.0,
+        max_tracked_ips: int = DEFAULT_MAX_TRACKED_IPS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        if max_bytes_per_window < 1:
+            raise ValueError("max_bytes_per_window must be at least 1")
+        if slot_ttl_seconds <= 0:
+            raise ValueError("slot_ttl_seconds must be positive")
+        if max_tracked_ips < 1:
+            raise ValueError("max_tracked_ips must be at least 1")
+        self._max_concurrent = max_concurrent
+        self._window_seconds = float(window_seconds)
+        self._max_bytes = max_bytes_per_window
+        self._slot_ttl_seconds = float(slot_ttl_seconds)
+        self._max_tracked_ips = max_tracked_ips
+        self._clock = clock
+        self._active: dict[str, Deque[float]] = {}
+        self._declared: dict[str, Deque[tuple[float, int]]] = {}
+
+    def start(self, ip: str, size: int) -> bool:
+        """Claim a slot for ``size`` declared bytes. False means refuse.
+
+        Nothing is claimed when the answer is False, so a refused upload does
+        not push the IP further over its own limit.
+        """
+        now = self._clock()
+        self._sweep_if_crowded(now)
+        active = self._active.get(ip)
+        if active is not None:
+            self._prune_active(ip, active, now)
+        if len(self._active.get(ip, ())) >= self._max_concurrent:
+            return False
+        declared = self._declared.get(ip)
+        if declared is not None:
+            self._prune_declared(ip, declared, now)
+        spent = sum(bytes_ for _, bytes_ in self._declared.get(ip, ()))
+        if spent + size > self._max_bytes:
+            return False
+        self._active.setdefault(ip, deque()).append(now)
+        self._declared.setdefault(ip, deque()).append((now, size))
+        return True
+
+    def finish(self, ip: str) -> None:
+        """Release one of this IP's slots. Bytes stay spent for the window.
+
+        Which slot is released does not matter — only how many are open — and
+        the bytes deliberately do not come back: the window measures how much
+        an IP asked us to hold, and finishing quickly is not a reason to be
+        allowed to ask for more.
+        """
+        active = self._active.get(ip)
+        if not active:
+            return
+        active.popleft()
+        if not active:
+            del self._active[ip]
+
+    def _prune_active(self, ip: str, active: Deque[float], now: float) -> None:
+        cutoff = now - self._slot_ttl_seconds
+        while active and active[0] <= cutoff:
+            active.popleft()
+        if not active:
+            del self._active[ip]
+
+    def _prune_declared(
+        self, ip: str, declared: Deque[tuple[float, int]], now: float
+    ) -> None:
+        cutoff = now - self._window_seconds
+        while declared and declared[0][0] <= cutoff:
+            declared.popleft()
+        if not declared:
+            del self._declared[ip]
+
+    def _sweep_if_crowded(self, now: float) -> None:
+        """Reclaim fully-drained buckets once the maps are crowded."""
+        if len(self._active) > self._max_tracked_ips:
+            for ip in [
+                ip
+                for ip, active in self._active.items()
+                if not active or active[-1] <= now - self._slot_ttl_seconds
+            ]:
+                del self._active[ip]
+        if len(self._declared) > self._max_tracked_ips:
+            for ip in [
+                ip
+                for ip, declared in self._declared.items()
+                if not declared or declared[-1][0] <= now - self._window_seconds
+            ]:
+                del self._declared[ip]
