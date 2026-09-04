@@ -442,3 +442,34 @@ def test_a_chunk_landing_after_the_sweep_leaves_no_orphan_behind(tmp_path):
 
     assert outcome == ["refused"]
     assert list(store.root.iterdir()) == [], "and left nothing behind"
+
+
+def test_the_same_chunk_sent_many_times_at_once_lands_once(tmp_path):
+    """The declared size is a ceiling, not a hope.
+
+    With the check on one side of the append and the count on the other, every
+    one of these requests passes the check and every one appends: one reserved
+    megabyte becomes eight on the disk, and both the store's byte ceiling and
+    the per-IP brake above it are bypassed by a single upload slot.
+    """
+    store = make_store(tmp_path)
+    upload_id = store.begin(size=1024, chunks=1)
+    start = threading.Barrier(8)
+    accepted = []
+
+    def race() -> None:
+        start.wait()
+        try:
+            store.write_chunk(upload_id, 0, b"x" * 1024)
+            accepted.append(True)
+        except BadChunk:
+            pass
+
+    threads = [threading.Thread(target=race) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(accepted) == 1
+    assert store.root.joinpath(*[p.name for p in store.root.iterdir()]).stat().st_size == 1024

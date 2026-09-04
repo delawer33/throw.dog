@@ -1782,7 +1782,9 @@ var T = @@__T__@@;
       bar.done();
       handOver(URL.createObjectURL(got.blob), got.name, got.size);
     }, function () {
-      bar.done();
+      // back(), not done(): done() leaves the status card hidden, and the
+      // reader would be looking at nothing at all on a throw already spent.
+      bar.back();
       fail(T.keyBad);
     });
   }

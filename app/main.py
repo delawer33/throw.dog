@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import BinaryIO, Iterator
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
@@ -39,7 +39,6 @@ from app.codewords import normalize
 from app.csp import FLOOR_POLICY
 from app.filestore import (
     BadChunk,
-    Checkout,
     FileStore,
     NoSuchUpload,
     UploadIncomplete,
@@ -302,38 +301,58 @@ def content_disposition(name: str | None) -> str:
 
 
 def _stream_file(
-    files: FileStore, ticket: str, held: Checkout, start: int, end: int
+    files: FileStore,
+    ticket: str,
+    source: BinaryIO,
+    start: int,
+    end: int,
 ) -> Iterator[bytes]:
-    """Yield ``[start, end]`` of a checked-out file, block by block.
+    """Yield ``[start, end]`` of an already-open file, block by block.
+
+    The file is opened by the caller, before a status line exists: opening it
+    here would mean a missing file becoming an exception halfway through a
+    body we have already promised the length of, and the client seeing a
+    truncated response with a traceback behind it instead of a 404.
 
     Never reads the file into memory: a 100 MB download costs one block at a
     time on this side, which is the only way a single small box can serve one
     at all.
 
-    The ticket dies here, at the end, and only if this response carried the
-    file's last byte — not merely "some bytes were served". A bot that opens
-    the connection and hangs up cannot end the download early, and a receiver
-    whose network dropped at 90% comes back to a file that is still there.
+    The ticket dies here, at the end, and only once the whole file has gone
+    out — not merely "some bytes were served", and not "this response ended at
+    the last byte" either. A bot that opens the connection and hangs up cannot
+    end the download early, a probe asking only for the tail cannot end it at
+    all, and a receiver whose network dropped at 90% comes back to a file that
+    is still there.
     """
     remaining = end - start + 1
     since_touch = 0
-    complete_delivery = end == held.size - 1
-    with open(held.path, "rb") as source:
-        source.seek(start)
-        while remaining > 0:
-            block = source.read(min(_DOWNLOAD_BLOCK_BYTES, remaining))
-            if not block:
-                # The file is shorter than its metadata says. Nothing to do but
-                # stop; the connection ends short and the receiver retries.
-                return
-            remaining -= len(block)
-            since_touch += len(block)
-            if since_touch >= _TOUCH_EVERY_BYTES:
-                since_touch = 0
-                if not files.touch(ticket):
+    with source:
+        try:
+            source.seek(start)
+            while remaining > 0:
+                block = source.read(min(_DOWNLOAD_BLOCK_BYTES, remaining))
+                if not block:
+                    # The file is shorter than its metadata says. Nothing to do
+                    # but stop; the connection ends short and the receiver
+                    # retries on a ticket that is still alive.
                     return
-            yield block
-    if complete_delivery:
+                remaining -= len(block)
+                since_touch += len(block)
+                if since_touch >= _TOUCH_EVERY_BYTES:
+                    since_touch = 0
+                    if not files.touch(ticket):
+                        return
+                yield block
+        except OSError:
+            # The volume went away underneath us. There is no status code left
+            # to send, so end the body rather than tear the connection down
+            # with a traceback.
+            return
+    # The store decides whether this was the last of it: what matters is that
+    # the whole file has now gone out, not that this response happened to end
+    # at its final byte.
+    if files.delivered(ticket, start, end):
         files.complete(ticket)
 
 
@@ -1156,6 +1175,7 @@ def create_app(
                 name=name,
                 mime=mime,
                 enc=scheme,
+                charged_to=ip,
             )
         except FilesStoreFull:
             uploads.finish(ip)
@@ -1206,11 +1226,16 @@ def create_app(
             return JSONResponse(
                 {"detail": "service is busy, try again in a minute"}, status_code=503
             )
-        # The slot is released only by an upload that actually finished. A
-        # ``done`` on an id we never issued must not hand anyone a free slot,
-        # and an upload that is still short is still in flight. A slot nobody
-        # ever closes ages out on the limiter's own timer.
-        uploads.finish(client_ip(request, config))
+        # The slot goes back to whoever it was taken from, which is not
+        # necessarily whoever is closing the upload: a phone that started on
+        # Wi-Fi and finished on mobile data arrives here as a different address,
+        # and releasing by that one would free a stranger's slot and leak its
+        # own. Only a finished upload releases anything — a ``done`` on an id we
+        # never issued must not hand out a free slot, and an upload still short
+        # of its bytes is still in flight. A slot nobody ever closes ages out on
+        # the limiter's own timer.
+        if filed.charged_to is not None:
+            uploads.finish(filed.charged_to)
         log_event(
             "created",
             filed.code,
@@ -1230,8 +1255,18 @@ def create_app(
         if held is None:
             return JSONResponse(MISS_BODY, status_code=404)
 
+        try:
+            source = open(held.path, "rb")
+        except OSError:
+            # The bytes are gone even though the ticket is not — a completed
+            # download of the same ticket racing this one, or a volume that
+            # failed. Either way it is a miss, said here where a status code is
+            # still possible.
+            return JSONResponse(MISS_BODY, status_code=404)
+
         span = parse_range(request.headers.get("range"), held.size)
         if span is UNSATISFIABLE:
+            source.close()
             return Response(
                 status_code=416,
                 headers={"Content-Range": f"bytes */{held.size}"},
@@ -1252,7 +1287,7 @@ def create_app(
             headers["Content-Range"] = f"bytes {start}-{end}/{held.size}"
 
         return StreamingResponse(
-            _stream_file(file_throws, ticket, held, start, end),
+            _stream_file(file_throws, ticket, source, start, end),
             status_code=206 if span is not None else 200,
             media_type="application/octet-stream",
             headers=headers,

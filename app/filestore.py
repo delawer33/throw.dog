@@ -120,14 +120,19 @@ class Grant(NamedTuple):
 class Filed(NamedTuple):
     """A finished upload: the address it answers to, and what it turned out to be.
 
-    The size and mode come back with the code because the caller has to
-    journal them and must not have to ask the store a second question about a
-    throw that, by then, someone may already have taken.
+    The size and mode come back with the code because the caller has to journal
+    them and must not have to ask the store a second question about a throw
+    that, by then, someone may already have taken. ``charged_to`` comes back
+    for the same reason and one more: it is what the upload *started* as, and
+    releasing a slot by the address on the closing request would free a
+    stranger's — the two are not the same IP when a phone changes network
+    mid-upload.
     """
 
     code: str
     size: int
     encrypted: bool
+    charged_to: str | None
 
 
 class Checkout(NamedTuple):
@@ -151,6 +156,11 @@ class _Upload:
     mime: str | None
     enc: str | None
     touched_at: float
+    #: Whatever the HTTP layer above needs handed back when this upload ends —
+    #: in practice the address its per-IP slot was charged to. Carried, never
+    #: read: which IP started an upload is a fact about the request, and the
+    #: store has no business having an opinion about it.
+    charged_to: str | None = None
     received_bytes: int = 0
     next_chunk: int = 0
     #: Serialises writes to this one file. Per-upload, so two senders never
@@ -179,6 +189,11 @@ class _Ticket:
     #: A taken ticket ignores the throw's TTL: a download that started before
     #: the deadline is allowed to finish after it. What kills it is silence.
     idle_until: float
+    #: How much of the file has actually gone out, counted from the start. A
+    #: resumed download continues from here; a range that begins past it — a
+    #: capability probe asking for the last byte, say — moves nothing, which is
+    #: what stops such a probe retiring the ticket and deleting the file.
+    delivered: int = 0
 
 
 class FileStore:
@@ -274,6 +289,7 @@ class FileStore:
         name: str | None = None,
         mime: str | None = None,
         enc: str | None = None,
+        charged_to: str | None = None,
     ) -> str:
         """Reserve room for ``size`` bytes and return the upload id.
 
@@ -312,6 +328,7 @@ class FileStore:
                 mime=mime,
                 enc=enc,
                 touched_at=now,
+                charged_to=charged_to,
             )
             self._reserved_bytes += size
         self._drain()
@@ -327,38 +344,49 @@ class FileStore:
         disagree about what is in it, and there is no repair worth writing:
         the upload is not addressable, so the honest answer is to fail and let
         the sender start again.
+
+        Checking and appending happen under the upload's own write lock, and
+        they have to: with the check on one side of the append and the count on
+        the other, N simultaneous requests for the *same* chunk all pass the
+        check and all append, and one reserved megabyte becomes N of them on
+        the disk. Serialising per upload costs an honest sender nothing — they
+        send their chunks one after another — and it is what makes the declared
+        size a real ceiling rather than a hope.
         """
-        now = self._clock()
         with self._lock:
             upload = self._uploads.get(upload_id)
-            if upload is None:
-                raise NoSuchUpload(upload_id)
-            if index != upload.next_chunk:
-                raise BadChunk(f"expected chunk {upload.next_chunk}, got {index}")
-            if index >= upload.chunks:
-                raise BadChunk("more chunks than were declared")
-            if len(data) > MAX_CHUNK_BYTES:
-                raise BadChunk("chunk is too big")
-            if upload.received_bytes + len(data) > upload.declared_size:
-                raise BadChunk("more bytes than were declared")
-            writing = upload.writing
-            upload.touched_at = now
-        with writing:
+        if upload is None:
+            raise NoSuchUpload(upload_id)
+        with upload.writing:
+            with self._lock:
+                # Re-read under the lock: between the lookup above and this
+                # line the sweeper may have taken the upload away.
+                if self._uploads.get(upload_id) is not upload:
+                    raise NoSuchUpload(upload_id)
+                if index != upload.next_chunk:
+                    raise BadChunk(f"expected chunk {upload.next_chunk}, got {index}")
+                if index >= upload.chunks:
+                    raise BadChunk("more chunks than were declared")
+                if len(data) > MAX_CHUNK_BYTES:
+                    raise BadChunk("chunk is too big")
+                if upload.received_bytes + len(data) > upload.declared_size:
+                    raise BadChunk("more bytes than were declared")
+                upload.touched_at = self._clock()
             with open(upload.path, "ab") as sink:
                 sink.write(data)
             with self._lock:
-                still_ours = self._uploads.get(upload_id) is upload
-                if still_ours:
-                    upload.received_bytes += len(data)
-                    upload.next_chunk += 1
-                    upload.touched_at = self._clock()
-                    return upload.received_bytes
-        # The sweeper dropped this upload while the chunk was in flight, and
-        # unlinked its file — which the append above has just brought back,
-        # under a name nothing refers to any more. Take it away again: a file
-        # nobody can reach is exactly the thing that must not accumulate.
-        _unlink(upload.path)
-        raise NoSuchUpload(upload_id)
+                if self._uploads.get(upload_id) is not upload:
+                    # Swept while this chunk was being written. The append has
+                    # just recreated the file the sweeper unlinked, under a name
+                    # nothing refers to any more; take it away again, because a
+                    # file nobody can reach is the one thing that must not pile
+                    # up on the volume.
+                    _unlink(upload.path)
+                    raise NoSuchUpload(upload_id)
+                upload.received_bytes += len(data)
+                upload.next_chunk += 1
+                upload.touched_at = self._clock()
+                return upload.received_bytes
 
     def finish(self, upload_id: str) -> Filed:
         """Turn a completed upload into a live throw and return its address.
@@ -396,6 +424,7 @@ class FileStore:
                     code=code,
                     size=upload.declared_size,
                     encrypted=upload.encrypted,
+                    charged_to=upload.charged_to,
                 )
         raise OutOfCodes("could not find an unused code")
 
@@ -492,6 +521,23 @@ class FileStore:
                 return False
             held.idle_until = now + self._ticket_idle_seconds
             return True
+
+    def delivered(self, ticket: str, start: int, end: int) -> bool:
+        """Record that bytes ``[start, end]`` went out; True if that was the lot.
+
+        Coverage from the beginning of the file, not "did this response happen
+        to end at the last byte". The difference is a throw: a download manager
+        probing with ``Range: bytes=-1`` gets the last byte of a file it has
+        none of, and under the simpler rule that probe would retire the ticket
+        and unlink the bytes before the receiver had any of them.
+        """
+        with self._lock:
+            held = self._tickets.get(ticket)
+            if held is None:
+                return False
+            if start <= held.delivered:
+                held.delivered = max(held.delivered, end + 1)
+            return held.delivered >= held.size
 
     def complete(self, ticket: str) -> bool:
         """The receiver has the whole file: forget the ticket, unlink the bytes."""

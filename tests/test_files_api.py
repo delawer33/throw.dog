@@ -591,3 +591,78 @@ def test_a_file_bigger_than_one_chunk_survives_the_whole_round_trip(client):
     assert head.content + tail.content == payload
     assert client.get(grant["url"]).status_code == 404, "delivered, so gone"
     assert client.app.state.files.total_bytes() == 0
+
+
+def test_a_probe_for_the_last_byte_does_not_destroy_the_throw(client):
+    """Download managers ask for one tail byte to see if ranges work.
+
+    Under a rule of "did this response end at the final byte" that probe is
+    indistinguishable from a completed download: the ticket retires and the
+    file is unlinked before the receiver has a single byte of it — with the
+    code already spent, so there is no second chance.
+    """
+    payload = b"0123456789" * 100
+    url = take(client, put_file(client, payload, chunk_size=64)).json()["url"]
+
+    probe = client.get(url, headers={"Range": "bytes=-1"})
+    assert probe.status_code == 206
+    assert probe.content == payload[-1:]
+
+    assert client.get(url).content == payload, "the file survived the probe"
+
+
+def test_a_resumed_download_still_ends_the_ticket_when_it_finishes(client):
+    payload = b"0123456789" * 100
+    url = take(client, put_file(client, payload, chunk_size=64)).json()["url"]
+
+    head = client.get(url, headers={"Range": "bytes=0-499"})
+    tail = client.get(url, headers={"Range": f"bytes=500-{len(payload) - 1}"})
+
+    assert head.content + tail.content == payload
+    assert client.get(url).status_code == 404, "the whole file went out, so it is gone"
+
+
+def test_bytes_that_vanish_under_a_live_ticket_are_a_miss_not_a_traceback(client):
+    """Two GETs can overlap: the first finishes and unlinks while the second runs.
+
+    Opening the file only once the body has started means a status line has
+    already gone out with a Content-Length on it, so the failure can no longer
+    be said — the client gets a truncated body and we get a traceback.
+    """
+    url = take(client, put_file(client, b"here for now")).json()["url"]
+    for leftover in client.app.state.files.root.iterdir():
+        leftover.unlink()
+
+    response = client.get(url)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "no such throw"}
+
+
+def test_an_upload_that_changes_network_frees_its_own_slot_not_a_strangers(limited):
+    """A phone that starts on Wi-Fi and finishes on mobile data.
+
+    Releasing by the address on the closing request frees whoever happens to
+    hold a slot at that address — on a CGNAT, a stranger — while the real slot
+    leaks for its full lifetime. Repeat it and the per-IP cap on that address
+    is gone.
+    """
+    client = limited(max_concurrent=1, max_bytes_per_window=10**9)
+    wifi = {"X-Forwarded-For": "10.0.0.1"}
+    mobile = {"X-Forwarded-For": "10.0.0.2"}
+    with_proxy = create_app(
+        Settings(miss_delay_ms=0, gate_tarpit_delay_ms=0, trusted_proxy=True),
+        upload_limiter=client.app.state.uploads,
+    )
+
+    with TestClient(with_proxy) as roaming:
+        started = roaming.post("/api/files", json={"size": 4, "chunks": 1}, headers=wifi)
+        upload = started.json()["upload"]
+        assert roaming.put(f"/api/files/{upload}/0", content=b"abcd", headers=mobile).status_code == 204
+        assert roaming.post(f"/api/files/{upload}/done", headers=mobile).status_code == 201
+
+        # The Wi-Fi address is free again — its own upload finished...
+        assert roaming.post("/api/files", json={"size": 4, "chunks": 1}, headers=wifi).status_code == 201
+        # ...and the mobile address never held a slot to give away.
+        second = roaming.post("/api/files", json={"size": 4, "chunks": 1}, headers=mobile)
+        assert second.status_code == 201
+        assert roaming.post("/api/files", json={"size": 4, "chunks": 1}, headers=mobile).status_code == 429
