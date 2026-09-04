@@ -62,6 +62,15 @@ CHUNK_BYTES: int = 4 * 1024 * 1024
 #: ceiling is the chunk size plus room for that overhead — not an exact equality.
 MAX_CHUNK_BYTES: int = CHUNK_BYTES + 64 * 1024
 
+#: The size ceilings, and the one place the two modes are deliberately not
+#: symmetric. An open file is one we can read and hold on our own disk, so the
+#: plank is low; a closed file is ciphertext we cannot understand, so it is
+#: cheaper to allow more of it. Both are measured in the plaintext the sender
+#: chose, never in our packaging (ADR 0005). They live here, next to the chunk
+#: size, because the pages that must print them cannot import the HTTP layer.
+OPEN_MAX_BYTES: int = 25 * 1024 * 1024
+CLOSED_MAX_BYTES: int = 100 * 1024 * 1024
+
 #: Ceilings so a flood of uploads cannot eat the box. Bytes are counted as
 #: *declared* size and reserved when the upload starts: a thousand uploads that
 #: each announce 100 MB must be refused before they write, not after.

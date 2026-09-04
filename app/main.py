@@ -43,6 +43,7 @@ from app.filestore import (
     UploadIncomplete,
 )
 from app.filestore import CHUNK_BYTES as FILE_CHUNK_BYTES
+from app.filestore import CLOSED_MAX_BYTES, OPEN_MAX_BYTES
 from app.filestore import MAX_CHUNK_BYTES as _MAX_CHUNK_BODY
 from app.filestore import OutOfCodes as FilesOutOfCodes
 from app.filestore import StoreFull as FilesStoreFull
@@ -80,13 +81,11 @@ DEFAULT_MAX_BYTES = 65536
 #: fake-door lists sit on — no new service, no new mount (ADR 0005).
 DEFAULT_FILES_DIR = "/data/throws"
 
-#: The size ceilings, and the one place the two modes are deliberately not
-#: symmetric. An open file is one we can read and hold on our own disk, so the
-#: plank is low; a closed file is ciphertext we cannot understand, so it is
-#: cheaper to allow more of it. Both are measured in plaintext, the units the
-#: sender can see (ADR 0005).
-DEFAULT_OPEN_FILE_MAX_BYTES = 25 * 1024 * 1024
-DEFAULT_CLOSED_FILE_MAX_BYTES = 100 * 1024 * 1024
+#: The size ceilings per mode. Defined in :mod:`app.filestore`, where the pages
+#: can reach them too — the number on the page and the number in the check have
+#: to be one number.
+DEFAULT_OPEN_FILE_MAX_BYTES = OPEN_MAX_BYTES
+DEFAULT_CLOSED_FILE_MAX_BYTES = CLOSED_MAX_BYTES
 
 #: How much of a file we hand to the socket at a time. Small enough that a
 #: 100 MB download never sits in this process's memory, big enough that the

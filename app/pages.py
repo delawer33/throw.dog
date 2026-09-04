@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Final
 
 from app.closedaddress import JS_PATTERN as CLOSED_ADDRESS_PATTERN
+from app.filestore import CHUNK_BYTES, CLOSED_MAX_BYTES, OPEN_MAX_BYTES
 from app.csp import policy_for
 
 # Sticker-punk palette and building blocks. No `%` in the template that wraps
@@ -240,6 +241,32 @@ _STYLE: Final = """
     flex: 1 1 130px; margin-top: 0; padding: 14px 10px;
     font-size: 15px; letter-spacing: .5px; box-shadow: 4px 4px 0 var(--ink);
   }
+
+  /* The drop zone. A file and a text are the same gesture here — one card,
+     one throw — so it sits under the textarea rather than behind a tab: a
+     person with a file in hand must not first have to find the file mode. */
+  .drop {
+    margin-top: 12px; border: 2px dashed #18120744; border-radius: 10px;
+    background: #FFFDF6; padding: 14px; text-align: center; cursor: pointer;
+    font-weight: 700; font-size: 14px; color: var(--ink); display: block; width: 100%;
+    font-family: inherit; transition: background .12s, border-color .12s;
+  }
+  .drop:hover, .drop.over { border-color: var(--ink); background: var(--mustard); }
+  .drop .dropnote { display: block; font-weight: 600; font-size: 12.5px; opacity: .7; margin-top: 3px; }
+  .drop input { display: none; }
+
+  /* Upload and download both take minutes on a big file, so the bar is not
+     decoration: without it a phone on a slow link looks frozen. */
+  .prog { margin-top: 14px; }
+  .progname {
+    font: 700 14px system-ui, sans-serif; word-break: break-all; margin-bottom: 8px;
+  }
+  .progbar {
+    height: 16px; border: 3px solid var(--ink); border-radius: 999px;
+    background: #fff; overflow: hidden;
+  }
+  .progfill { height: 100%; width: 0; background: var(--mustard); transition: width .18s; }
+  .progpct { font: 800 13px system-ui, sans-serif; margin-top: 8px; opacity: .8; }
 
   /* SEO landing prose: the same .prose card the legal pages use, spaced to sit
      below the chips. The copy is part of the page, not a page of its own. */
@@ -670,6 +697,25 @@ def _mode_row(*, closed: bool) -> str:
     )
 
 
+#: The drop zone, on BOTH sender pages. A person who prefers the closed mode
+#: still has files to throw, and a mode that quietly lost half the product when
+#: chosen would be a trap rather than a choice.
+_DROP_ZONE: Final = """        <label class="drop" id="drop">
+          @@dropLabel@@
+          <span class="dropnote">@@dropNote@@</span>
+          <input type="file" id="file">
+        </label>"""
+
+#: What replaces the compose card while the bytes move. A file takes minutes,
+#: and minutes with no feedback read as a hang.
+_PROGRESS_CARD: Final = """      <div id="prog" class="prog" hidden>
+        <p class="donelabel" id="progtitle"></p>
+        <p class="progname" id="progname"></p>
+        <div class="progbar"><div class="progfill" id="progfill"></div></div>
+        <p class="progpct" id="progpct"></p>
+      </div>"""
+
+
 #: "Got a code?" — on both sender pages, because a person who prefers the closed
 #: mode still receives throws, and the page they land on first is whichever one
 #: their remembered choice sends them to.
@@ -762,6 +808,123 @@ function tdClosedTarget(value){
   return '/' + last + hash;
 }
 """
+
+#: The numbers and the way a size is spoken. Every page that mentions a file
+#: needs these — the senders to refuse an oversized one before it moves, the
+#: receiver to say how big the one it is handing over is.
+_FILE_SIZE_JS: Final = ("""
+var TD_CHUNK = %d, TD_OPEN_MAX = %d, TD_CLOSED_MAX = %d;
+""" % (CHUNK_BYTES, OPEN_MAX_BYTES, CLOSED_MAX_BYTES)) + r"""
+// Sizes are shown the way a person reads them, not the way a disk counts.
+function tdSize(bytes){
+  if (bytes >= 1048576) { return Math.round(bytes / 1048576) + ' MB'; }
+  if (bytes >= 1024) { return Math.round(bytes / 1024) + ' KB'; }
+  return bytes + ' B';
+}
+function tdLimitText(text, limit){ return text.replace('{limit}', tdSize(limit)); }
+"""
+
+#: Sending a file, which only the two senders do. Deliberately not on the
+#: receiver: a page that can only take must carry no code for giving, and the
+#: receiver's one guarantee — it contacts the server exactly once, because
+#: contacting it is what spends the throw — is easiest to keep true when there
+#: is nothing else there that could call out.
+_UPLOAD_JS: Final = r"""
+// The progress card. It replaces the compose card rather than sitting under it:
+// while a file is moving there is nothing else to do on this page, and a live
+// textarea would invite a second throw on top of the first.
+function tdProgress(compose, title, name){
+  var prog = document.getElementById('prog');
+  document.getElementById('progtitle').textContent = title;
+  document.getElementById('progname').textContent = name;
+  compose.hidden = true;
+  prog.hidden = false;
+  return {
+    at: function (done, total) {
+      var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      document.getElementById('progfill').style.width = pct + '%';
+      document.getElementById('progpct').textContent = pct + '% · ' + tdSize(total);
+    },
+    done: function () { prog.hidden = true; },
+    back: function () { prog.hidden = true; compose.hidden = false; }
+  };
+}
+
+// A file is thrown by dropping it, exactly as a text is thrown by pasting it.
+// The drop target is the whole card, not the little dashed rectangle: aiming
+// at a 40-pixel strip with a dragged file is a task, and this is meant to be a
+// gesture.
+function tdWireDrop(card, input, onFile){
+  var drop = document.getElementById('drop');
+  input.addEventListener('change', function () {
+    if (input.files && input.files[0]) { onFile(input.files[0]); }
+    input.value = '';
+  });
+  ['dragenter', 'dragover'].forEach(function (name) {
+    card.addEventListener(name, function (event) {
+      event.preventDefault();
+      drop.classList.add('over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (name) {
+    card.addEventListener(name, function () { drop.classList.remove('over'); });
+  });
+  card.addEventListener('drop', function (event) {
+    event.preventDefault();
+    var dropped = event.dataTransfer && event.dataTransfer.files;
+    // One file per throw. Taking the first of several silently would be worse
+    // than refusing: the sender would walk away believing all of them went.
+    if (dropped && dropped.length === 1) { onFile(dropped[0]); }
+  });
+}
+
+// The three handles, in order. The address does not exist until the last one
+// answers, which is the whole reason there are three: a code handed out early
+// sends the receiver to a throw that is still arriving.
+function tdUpload(start, pieces, at){
+  var total = pieces.reduce(function (sum, piece) { return sum + piece.size; }, 0);
+  var upload;
+  function fail(response){
+    if (response.status === 413) { throw new Error('too-big'); }
+    if (response.status === 429) { throw new Error('busy'); }
+    throw new Error('failed');
+  }
+  return fetch('/api/files', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(start)
+  }).then(null, function () { throw new Error('net'); })
+    .then(function (response) {
+      if (!response.ok) { fail(response); }
+      return response.json();
+    }).then(function (data) {
+      upload = data.upload;
+      var sent = 0;
+      // Strictly in order, one at a time. Parallel chunks would arrive out of
+      // order on any real network, and the server appends what it is given.
+      return pieces.reduce(function (chain, piece, index) {
+        return chain.then(function () {
+          return fetch('/api/files/' + upload + '/' + index, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: piece
+          }).then(null, function () { throw new Error('net'); });
+        }).then(function (response) {
+          if (!response.ok) { fail(response); }
+          sent += piece.size;
+          at(sent, total);
+        });
+      }, Promise.resolve());
+    }).then(function () {
+      return fetch('/api/files/' + upload + '/done', { method: 'POST' })
+        .then(null, function () { throw new Error('net'); });
+    }).then(function (response) {
+      if (!response.ok) { fail(response); }
+      return response.json();
+    });
+}
+"""
+
 
 #: Where the remembered mode and the carried-over draft live. The draft rides in
 #: sessionStorage, never in the URL and never through us: switching mode must
@@ -890,9 +1053,11 @@ _SENDER_TMPL: Final = _HEAD + """<body>
     <div class="card">
       <div id="compose">
         <textarea id="text" autofocus placeholder="@@placeholder@@"></textarea>
+""" + _DROP_ZONE + """
         <button class="btn wide" id="throw" type="button">@@throwBtn@@</button>
         <p id="error" class="error" hidden></p>
       </div>
+""" + _PROGRESS_CARD + """
 
       <div id="done" hidden>
         <p class="donelabel">@@doneLabel@@</p>
@@ -949,7 +1114,7 @@ var T = @@__T__@@;
 // mode the visitor settled on. Only an explicit act — the switch, a throw —
 // may write it there.
 var TD_IS_LANDING = @@isLanding@@;
-""" + _QR_JS + _CRYPTO_CHECK_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + """
+""" + _QR_JS + _CRYPTO_CHECK_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + _FILE_SIZE_JS + _UPLOAD_JS + """
 (function () {""" + _COMPOSE_JS + """
   var codebig = document.getElementById('codebig');
 
@@ -1000,20 +1165,68 @@ var TD_IS_LANDING = @@isLanding@@;
       if (!response.ok) { throw new Error(T.throwFailed); }
       return response.json();
     }).then(function (data) {
-      tdTrack('code_created');
-      currentUrl = window.location.origin + '/' + data.code;
-      codebig.textContent = data.code;
-      urlEl.textContent = currentUrl.replace(/^https?:\\/\\//, '');
-      qrEl.innerHTML = qrSVG(currentUrl);
-      compose.hidden = true;
-      done.hidden = false;
-      throwAnim();
+      showThrown(data.code);
     }).catch(function (err) {
       fail(err && err.message ? err.message : T.netSend);
     }).then(function () {
       busy = false;
     });
   }
+
+  // The result card is the same one a text lands on: a file and a text are one
+  // product, and a second layout for the second kind would say otherwise.
+  function showThrown(code) {
+    tdTrack('code_created');
+    currentUrl = window.location.origin + '/' + code;
+    codebig.textContent = code;
+    urlEl.textContent = currentUrl.replace(/^https?:\\/\\//, '');
+    qrEl.innerHTML = qrSVG(currentUrl);
+    compose.hidden = true;
+    done.hidden = false;
+    throwAnim();
+  }
+
+  function sendFile(file) {
+    if (busy) { return; }
+    if (!file.size) { fail(T.fileEmpty); return; }
+    // The size is checked here as well as on the server, and not because the
+    // server's check is in doubt: a 200 MB file refused after it has been
+    // uploaded is a minute of someone's life and a minute of our bandwidth.
+    if (file.size > TD_OPEN_MAX) {
+      fail(tdLimitText(T.fileTooBig, TD_OPEN_MAX));
+      return;
+    }
+    busy = true;
+    error.hidden = true;
+    var pieces = [];
+    for (var at = 0; at < file.size; at += TD_CHUNK) {
+      pieces.push(file.slice(at, Math.min(at + TD_CHUNK, file.size)));
+    }
+    var bar = tdProgress(compose, T.uploading, file.name);
+    bar.at(0, file.size);
+    tdUpload({
+      size: file.size,
+      chunks: pieces.length,
+      name: file.name,
+      mime: file.type || null
+    }, pieces, bar.at).then(function (data) {
+      bar.done();
+      showThrown(data.code);
+    }).catch(function (err) {
+      bar.back();
+      var reason = err && err.message;
+      if (reason === 'too-big') { fail(tdLimitText(T.fileTooBig, TD_OPEN_MAX)); }
+      else if (reason === 'busy') { fail(T.uploadBusy); }
+      else if (reason === 'net') { fail(T.netSend); }
+      else { fail(T.uploadFailed); }
+    }).then(function () {
+      busy = false;
+    });
+  }
+
+  tdWireDrop(
+    text.closest('.card'), document.getElementById('file'), sendFile
+  );
 
 """ + _compose_wiring_js(track=True) + _get_card_js(track=True) + """
   // Pro fake-door: chip reveals the "coming soon" panel; the email is POSTed to
@@ -1125,9 +1338,11 @@ _CLOSED_SENDER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
     <div class="card">
       <div id="compose">
         <textarea id="text" autofocus placeholder="@@placeholder@@"></textarea>
+""" + _DROP_ZONE + """
         <button class="btn wide" id="throw" type="button">@@throwBtn@@</button>
         <p id="error" class="error" hidden></p>
       </div>
+""" + _PROGRESS_CARD + """
 
       <div id="done" class="doneclosed" hidden>
         <p class="donelabel">@@doneClosedLabel@@</p>
@@ -1246,6 +1461,13 @@ _RECEIVER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
         <pre id="text"></pre>
         <button class="btn ghost" id="copy" type="button">@@copyBtn@@</button>
       </div>
+
+      <div id="fileresult" hidden>
+        <p class="donelabel">@@fileReady@@</p>
+        <p class="progname" id="filename"></p>
+        <a class="btn wide" id="download" download>@@downloadBtn@@</a>
+        <p class="hint">@@fileHint@@</p>
+      </div>
     </div>
   </div>
 
@@ -1256,7 +1478,7 @@ _RECEIVER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
 
 <script>
 var T = @@__T__@@;
-""" + _CRYPTO_JS + _CLOSED_RE_JS + """
+""" + _CRYPTO_JS + _CLOSED_RE_JS + _FILE_SIZE_JS + """
 (function () {
   var status = document.getElementById('status');
   var result = document.getElementById('result');
@@ -1280,6 +1502,25 @@ var T = @@__T__@@;
     target.textContent = value;
     status.hidden = true;
     result.hidden = false;
+  }
+
+  // A file is not shown, it is handed over. The server already answers with
+  // ``attachment``, so the browser saves it instead of rendering it — an open
+  // file is somebody else's content served from our domain, and rendering it
+  // would make us its host.
+  //
+  // The download starts by itself and the button stays: on a browser that
+  // blocked the automatic navigation, the throw is already spent, and leaving
+  // the reader with no way to the bytes would be the worst possible ending.
+  function showFile(data) {
+    var link = document.getElementById('download');
+    link.href = data.url;
+    if (data.name) { link.setAttribute('download', data.name); }
+    document.getElementById('filename').textContent =
+      (data.name || '') + (data.name ? ' · ' : '') + tdSize(data.size);
+    status.hidden = true;
+    document.getElementById('fileresult').hidden = false;
+    link.click();
   }
 
   // The key leaves the address bar the moment its fate is settled, and not
@@ -1306,6 +1547,7 @@ var T = @@__T__@@;
         return response.json();
       })
       .then(function (data) {
+        if (data.kind === 'file' && !data.enc) { showFile(data); return; }
         if (!data.enc) { show(data.text); return; }
         if (!imported) { fail(T.keyBad); return; }
         chip.textContent = T.chipClosed;
@@ -1439,6 +1681,20 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "fbSubmit": "send",
         "fbThanks": "thank you — this genuinely helps.",
         "fbEmpty": "Write something first.",
+        # Files. One file per throw, thrown the moment it is dropped — the same
+        # gesture as pasting text, because it is the same product.
+        "dropLabel": "📎 Drop a file here, or click to pick one",
+        "dropNote": "One file, up to {limit}. Dropping it throws it.",
+        "fileTooBig": "That file is too big — the limit here is {limit}.",
+        "fileEmpty": "That file is empty.",
+        "uploading": "Throwing the file…",
+        "downloading": "Fetching the file…",
+        "uploadFailed": "Couldn't send the file. Try again.",
+        "uploadBusy": "Too many uploads from here. Wait a minute and try again.",
+        "fileReady": "The file is on its way to your downloads:",
+        "fileHint": "This link works until the download finishes, then it is gone.",
+        "downloadBtn": "download",
+        "downloadFailed": "The download stopped. Try the button again.",
     },
     "ru": {
         "taglineA": "Кинь.",
@@ -1501,6 +1757,18 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "fbSubmit": "отправить",
         "fbThanks": "спасибо — это правда помогает.",
         "fbEmpty": "Сначала напиши что-нибудь.",
+        "dropLabel": "📎 Брось файл сюда или нажми, чтобы выбрать",
+        "dropNote": "Один файл, до {limit}. Бросок начинается сразу.",
+        "fileTooBig": "Файл слишком большой — здесь лимит {limit}.",
+        "fileEmpty": "Файл пустой.",
+        "uploading": "Бросаю файл…",
+        "downloading": "Приношу файл…",
+        "uploadFailed": "Не удалось отправить файл. Попробуй ещё раз.",
+        "uploadBusy": "Слишком много загрузок отсюда. Подожди минуту и попробуй снова.",
+        "fileReady": "Файл уходит в загрузки:",
+        "fileHint": "Ссылка живёт до конца скачивания, потом исчезает.",
+        "downloadBtn": "скачать",
+        "downloadFailed": "Скачивание оборвалось. Нажми кнопку ещё раз.",
     },
 }
 
@@ -1540,6 +1808,21 @@ def pick_locale(accept_language: str | None) -> str:
     return best_lang
 
 
+def human_size(size: int) -> str:
+    """A size the way a person reads it. The twin of ``tdSize`` in the page JS.
+
+    Both exist because the same limit is printed in two places — the drop zone
+    the server renders, and the message the browser shows when a file is over
+    it — and a person who reads "25 MB" on one and "26214400 bytes" on the
+    other has been told two different things.
+    """
+    if size >= 1048576:
+        return f"{round(size / 1048576)} MB"
+    if size >= 1024:
+        return f"{round(size / 1024)} KB"
+    return f"{size} B"
+
+
 def _render(
     template: str,
     lang: str,
@@ -1549,6 +1832,7 @@ def _render(
     is_landing: bool = False,
     footer_guides: bool = False,
     lang_switch_html: str = "",
+    file_limit: int = OPEN_MAX_BYTES,
 ) -> str:
     """Fill a page template's ``@@key@@`` tokens and ``var T`` blob for ``lang``.
 
@@ -1575,6 +1859,13 @@ def _render(
     landings, /closed and receiver pages all render the slot empty.
     """
     strings = STRINGS[lang] if extra is None else {**STRINGS[lang], **extra}
+    # The drop zone names the limit of the mode this page is in — the two are
+    # deliberately different (ADR 0005), so a page that printed the other's
+    # number would be promising something it then refuses.
+    strings = {
+        **strings,
+        "dropNote": strings["dropNote"].replace("{limit}", human_size(file_limit)),
+    }
     out = template.replace("@@headMeta@@", head_meta)
     out = out.replace("@@landingBody@@", landing_body)
     out = out.replace("@@modeRedirect@@", "" if is_landing else _MODE_REDIRECT_SCRIPT)
@@ -1613,7 +1904,9 @@ def render_sender(lang: str = DEFAULT_LOCALE) -> str:
 def render_closed_sender(lang: str = DEFAULT_LOCALE) -> str:
     # Not indexable: the homepage is the one entry point, and this page is the
     # same product with a different mode selected.
-    return _render(_CLOSED_SENDER_TMPL, lang, head_meta=_NOINDEX_META)
+    return _render(
+        _CLOSED_SENDER_TMPL, lang, head_meta=_NOINDEX_META, file_limit=CLOSED_MAX_BYTES
+    )
 
 
 def render_receiver(lang: str = DEFAULT_LOCALE) -> str:
@@ -1644,6 +1937,7 @@ def render_landing(
     return _render(
         template,
         lang,
+        file_limit=CLOSED_MAX_BYTES if closed else OPEN_MAX_BYTES,
         head_meta=head_meta,
         extra=strings,
         landing_body=body,

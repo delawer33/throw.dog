@@ -38,8 +38,11 @@ const els = {};
 globalThis.document = {
   getElementById: function (id) {
     if (!els[id]) {
-      els[id] = { textContent: '', className: '', hidden: false,
-                  addEventListener: function () {} };
+      els[id] = { textContent: '', className: '', hidden: false, href: '',
+                  clicks: 0,
+                  addEventListener: function () {},
+                  setAttribute: function (name, value) { els[id][name] = value; },
+                  click: function () { els[id].clicks++; } };
     }
     return els[id];
   }
@@ -75,6 +78,13 @@ async function setup() {
   } else if (SCENARIO === 'open_code') {
     hash = '';
     respond = () => ({ status: 200, ok: true, text: 'plain as day' });
+  } else if (SCENARIO === 'open_file') {
+    hash = '';
+    respond = () => ({
+      status: 200, ok: true,
+      file: { kind: 'file', ticket: 't', url: '/api/files/t/t',
+              size: 5242880, name: 'holiday.mp4', mime: 'video/mp4' }
+    });
   }
 
   window.location = { hash: hash, pathname: PATHNAME, search: '' };
@@ -85,6 +95,7 @@ async function setup() {
     return Promise.resolve({
       status: r.status, ok: r.ok,
       json: function () {
+        if (r.file) { return Promise.resolve(r.file); }
         const body = { text: r.text };
         if (r.enc) { body.enc = r.enc; }
         return Promise.resolve(body);
@@ -105,7 +116,12 @@ setup().then(function () {
     statusClass: els.status ? els.status.className : null,
     shown: els.text ? els.text.textContent : null,
     resultHidden: els.result ? els.result.hidden : null,
-    chip: els.chip ? els.chip.textContent : null
+    chip: els.chip ? els.chip.textContent : null,
+    fileHidden: els.fileresult ? els.fileresult.hidden : null,
+    downloadHref: els.download ? els.download.href : null,
+    downloadName: els.download ? els.download.download : null,
+    downloadClicks: els.download ? els.download.clicks : null,
+    fileLabel: els.filename ? els.filename.textContent : null
   }));
 }).catch(function (e) {
   process.stderr.write(String(e && e.stack));
@@ -222,3 +238,18 @@ def test_the_three_outcomes_are_three_different_messages(script):
     bad = run(script, "wrong_key")["status"]
     gone = run(script, "gone")["status"]
     assert len({missing, bad, gone}) == 3
+
+
+def test_an_open_file_is_handed_over_rather_than_shown(script):
+    # A file is never rendered in the tab: the server answers with
+    # ``attachment``, and the page's job is only to start the save and leave a
+    # way back to it if the browser refused to.
+    out = run(script, "open_file", pathname="/basted-lily")
+
+    assert out["fetches"] == 1, "one request, and it is the one that spends the throw"
+    assert out["fileHidden"] is False
+    assert out["shown"] == "", "nothing was rendered into the text pane"
+    assert out["downloadHref"] == "/api/files/t/t"
+    assert out["downloadName"] == "holiday.mp4"
+    assert out["downloadClicks"] == 1, "the download starts by itself"
+    assert "holiday.mp4" in out["fileLabel"] and "5 MB" in out["fileLabel"]

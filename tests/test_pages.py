@@ -566,3 +566,50 @@ def test_terms_describes_both_modes_and_the_price_of_the_closed_one(client):
     assert "two-word code" in body
     assert "cannot recover a closed throw" in body
     assert "handed out" in body
+
+
+# --- files on the pages -----------------------------------------------------
+
+
+@pytest.mark.parametrize("lang", ["en", "ru"])
+def test_both_senders_take_a_file_in_either_language(lang):
+    """A mode that quietly lost half the product would be a trap, not a choice."""
+    for page in (render_sender(lang), render_closed_sender(lang)):
+        assert 'id="drop"' in page
+        assert 'type="file"' in page
+        assert 'id="progfill"' in page
+        assert STRINGS[lang]["dropLabel"] in page
+
+
+def test_each_sender_prints_its_own_size_limit():
+    # The two are deliberately different (ADR 0005): an open file is one we can
+    # read and hold, a closed one is ciphertext. A page printing the other's
+    # number would promise what it then refuses.
+    assert "25 MB" in render_sender("en")
+    assert "100 MB" not in render_sender("en")
+    assert "100 MB" in render_closed_sender("en")
+
+
+@pytest.mark.parametrize(
+    "render,limit",
+    [(render_sender, "25 MB"), (render_closed_sender, "100 MB")],
+)
+def test_the_drop_note_names_a_real_size_not_a_placeholder(render, limit):
+    # The note is rendered by the server, the over-limit message by the
+    # browser; both have to say the same number, so the server does the
+    # substitution here rather than leaving it to the page.
+    for lang in ("en", "ru"):
+        note = re.search(r'<span class="dropnote">([^<]*)</span>', render(lang))
+        assert note, "the drop zone lost its note"
+        assert "{limit}" not in note.group(1)
+        assert limit in note.group(1)
+
+
+def test_the_receiver_hands_a_file_over_instead_of_rendering_it():
+    page = RECEIVER_PAGE
+    assert 'id="download"' in page
+    assert "download" in page
+    # No code for sending anything: the receiver only ever takes, and its one
+    # guarantee is that it contacts the server exactly once.
+    assert "tdUpload" not in page
+    assert page.count("fetch(") == 1
