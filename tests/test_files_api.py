@@ -567,3 +567,27 @@ def test_a_flood_of_uploads_hits_the_limit_before_it_hits_the_disk(limited, tmp_
     # and so does a read. The upload brake never touches the read path.
     code = client.post("/api/throws", json={"text": "still working"}).json()["code"]
     assert take(client, code).json() == {"text": "still working"}
+
+
+def test_a_file_bigger_than_one_chunk_survives_the_whole_round_trip(client):
+    """Three chunks up, a dropped download, a resume — and the same bytes back.
+
+    Everything else here is small enough to fit in one chunk, which is exactly
+    the case where an off-by-one in the chunking cannot show itself.
+    """
+    from app.filestore import CHUNK_BYTES
+
+    payload = bytes(range(256)) * ((CHUNK_BYTES * 2 + 1000) // 256)
+    code = send(client, payload, name="holiday.mp4", mime="video/mp4")
+
+    grant = take(client, code).json()
+    assert grant["size"] == len(payload)
+
+    half = len(payload) // 2
+    head = client.get(grant["url"], headers={"Range": f"bytes=0-{half - 1}"})
+    tail = client.get(grant["url"], headers={"Range": f"bytes={half}-{len(payload) - 1}"})
+
+    assert head.status_code == 206 and tail.status_code == 206
+    assert head.content + tail.content == payload
+    assert client.get(grant["url"]).status_code == 404, "delivered, so gone"
+    assert client.app.state.files.total_bytes() == 0
