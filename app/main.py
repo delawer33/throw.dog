@@ -267,7 +267,9 @@ def clean_filename(raw: object) -> str | None:
         return None
     name = raw.replace("\\", "/").rsplit("/", 1)[-1]
     name = "".join(char for char in name if char.isprintable()).strip()
-    name = name.strip(".")
+    # rstrip, not strip: a leading dot is a real name (".gitignore"), while a
+    # name that is nothing but dots ("." or "..") falls to empty and is refused.
+    name = name.rstrip(".")
     if not name:
         return None
     return name[:MAX_FILENAME_LEN]

@@ -1674,7 +1674,11 @@ var TD_IS_LANDING = @@isLanding@@;
         plain: file.size,
         size: wire,
         chunks: pieces.length
-      }, pieces, function (sent, total) { bar.at(sent, total); });
+      // Rescaled to the plaintext: what tdUpload counts is the wire, and the
+      // sender is watching their own file move, not our packaging of it.
+      }, pieces, function (sent) {
+        bar.at(Math.round(sent / wire * file.size), file.size);
+      });
     }).then(function (data) {
       return tdExportKey(key).then(function (encoded) {
         bar.done();

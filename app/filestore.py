@@ -31,12 +31,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Callable, Final, NamedTuple
 
 from app.closedaddress import generate as generate_address
 from app.codewords import generate as generate_code
@@ -681,13 +682,27 @@ class FileStore:
         constructing the store must not touch a disk: ``app.main`` builds one
         at import time, and importing a module is not the moment to create a
         directory — least of all in a test run or a CI box that has no volume.
+
+        Only our own files go: an operator who points ``THROW_FILES_DIR`` at a
+        directory that holds something else must not lose it to our startup.
+        A file of ours is named by a sha256 digest and nothing else is.
         """
         if self._prepared:
             return
         if self._root.exists():
-            shutil.rmtree(self._root, ignore_errors=True)
+            for child in self._root.iterdir():
+                if not _IS_OURS.fullmatch(child.name):
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    _unlink(child)
         self._root.mkdir(parents=True, exist_ok=True)
         self._prepared = True
+
+
+#: The shape of a name we gave a file ourselves — see ``_path_for``.
+_IS_OURS: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def _unlink(path: Path) -> None:

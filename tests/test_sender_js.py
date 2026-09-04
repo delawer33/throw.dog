@@ -154,6 +154,7 @@ async function main() {
     shownUrl: url,
     navigated: window.location.href,
     decrypted: decrypted,
+    progpct: document.getElementById('progpct').textContent,
     composeHidden: els.compose.hidden,
     doneHidden: els.done.hidden,
     error: els.error.textContent
@@ -285,3 +286,14 @@ def test_a_thrown_file_ends_on_the_same_card_a_thrown_text_does(script):
     assert out["composeHidden"] is True
     assert out["doneHidden"] is False
     assert out["shownUrl"].count("#") == 1, "the key is in the fragment, as ever"
+
+
+def test_the_progress_a_sender_watches_counts_their_file_not_our_packaging(script):
+    # The bar's denominator is the plaintext: a sender who picked a 40-byte file
+    # must not be told they are sending 100, and 100% must land on their number.
+    out = run(script, "file")
+    plain = len(SECRET.encode("utf-8"))
+    wire = out["posted"][0]["body"]["size"]
+
+    assert wire > plain, "the control: the two numbers really do differ"
+    assert out["progpct"] == "100% · " + str(plain) + " B"

@@ -339,7 +339,7 @@ def test_constructing_the_store_touches_no_disk(tmp_path):
 def test_the_directory_is_emptied_on_startup(tmp_path):
     root = tmp_path / "throws"
     root.mkdir()
-    (root / "left-over").write_bytes(b"from a previous life")
+    (root / ("b" * 64)).write_bytes(b"from a previous life")
 
     store = FileStore(root, clock=FakeClock())
     store.prepare()
@@ -473,3 +473,24 @@ def test_the_same_chunk_sent_many_times_at_once_lands_once(tmp_path):
 
     assert len(accepted) == 1
     assert store.root.joinpath(*[p.name for p in store.root.iterdir()]).stat().st_size == 1024
+
+
+def test_a_restart_wipes_our_own_files_and_leaves_a_neighbour_alone(tmp_path):
+    # THROW_FILES_DIR can be pointed at a volume that already holds something
+    # else — the pro mailbox, the feedback log. Startup is amnesia for our own
+    # bytes, not a broom for the whole directory.
+    root = tmp_path / "shared"
+    root.mkdir()
+    ours = root / ("a" * 64)
+    ours.write_bytes(b"an orphan from the last life")
+    theirs = root / "pro-emails.jsonl"
+    theirs.write_bytes(b"paid for it")
+    subdir = root / "feedback"
+    subdir.mkdir()
+    (subdir / "note.txt").write_bytes(b"keep me")
+
+    FileStore(root, clock=FakeClock()).prepare()
+
+    assert not ours.exists()
+    assert theirs.read_bytes() == b"paid for it"
+    assert (subdir / "note.txt").read_bytes() == b"keep me"

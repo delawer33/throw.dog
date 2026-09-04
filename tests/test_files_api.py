@@ -456,6 +456,19 @@ def test_a_filename_is_reduced_to_a_bare_name(client):
     assert take(client, code).json()["name"] == "passwd"
 
 
+def test_a_name_that_starts_with_a_dot_arrives_with_its_dot(client):
+    # A leading dot is part of the name, not decoration: a receiver saving
+    # ".gitignore" as "gitignore" gets a file their tools will ignore.
+    code = send(client, b"payload", name=".gitignore")
+    assert take(client, code).json()["name"] == ".gitignore"
+
+
+@pytest.mark.parametrize("name", [".", "..", "...", "  ..  "])
+def test_a_name_that_is_nothing_but_dots_is_no_name_at_all(name, client):
+    code = send(client, b"payload", name=name)
+    assert "name" not in take(client, code).json()
+
+
 def test_a_junk_mime_is_dropped_rather_than_echoed(client):
     code = send(client, b"payload", name="x.bin", mime="not a mime type")
     assert "mime" not in take(client, code).json()
