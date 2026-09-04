@@ -70,6 +70,10 @@ class ThrowStore:
         address_generator: callable returning a candidate closed address, used
             to address closed throws. A closed throw has no two-word code —
             see :mod:`app.closedaddress` for why the two spaces must not meet.
+        is_reserved: asks another store whether a candidate address is already
+            in use. Text and file throws are addressed out of one space — a
+            receiver types two words and cannot know which kind is behind them
+            — so a code live in either store must be live for both.
         code_attempts: how many candidates to try before giving up.
         max_entries: how many throws may be alive at once.
         max_total_bytes: how much throw text may be resident at once.
@@ -81,6 +85,7 @@ class ThrowStore:
         clock: Callable[[], float] = time.monotonic,
         code_generator: Callable[[], str] = generate_code,
         address_generator: Callable[[], str] = generate_address,
+        is_reserved: Callable[[str], bool] | None = None,
         code_attempts: int = _DEFAULT_CODE_ATTEMPTS,
         max_entries: int = DEFAULT_MAX_ENTRIES,
         max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
@@ -97,6 +102,7 @@ class ThrowStore:
         self._clock = clock
         self._generate_code = code_generator
         self._generate_address = address_generator
+        self._is_reserved = is_reserved or (lambda _code: False)
         self._code_attempts = code_attempts
         self._max_entries = max_entries
         self._max_total_bytes = max_total_bytes
@@ -132,7 +138,7 @@ class ThrowStore:
                 raise StoreFull("live throws would exceed the memory ceiling")
             for _ in range(self._code_attempts):
                 code = pick()
-                if code in self._entries:
+                if code in self._entries or self._is_reserved(code):
                     continue
                 self._entries[code] = _Entry(
                     text=text,
@@ -143,6 +149,18 @@ class ThrowStore:
                 self._total_bytes += size_bytes
                 return code
         raise OutOfCodes("could not find an unused code")
+
+    def holds(self, code: str) -> bool:
+        """Whether ``code`` addresses a live text throw.
+
+        Read without the lock on purpose. Its only caller is the file store's
+        code picker, which holds its own lock at the time; taking ours
+        underneath it would give two locks two acquisition orders and, one day,
+        a deadlock. A dict lookup is atomic here, and a candidate that goes
+        stale between this answer and its use is no worse than the race the
+        picker already tolerates.
+        """
+        return code in self._entries
 
     def take(self, code: str) -> Throw | None:
         """Remove and return the throw for ``code``, text and mode together.
