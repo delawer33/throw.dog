@@ -32,6 +32,13 @@ services:
       - THROW_GATE_MAX_TRACKED_IPS
       - THROW_TRUSTED_PROXY
       - THROW_FORWARDED_HEADER
+      # Файлы: каталог на том же томе pro_data и лимиты режимов/загрузок.
+      - THROW_FILES_DIR
+      - THROW_OPEN_FILE_MAX_BYTES
+      - THROW_CLOSED_FILE_MAX_BYTES
+      - THROW_UPLOAD_MAX_CONCURRENT
+      - THROW_UPLOAD_WINDOW_SECONDS
+      - THROW_UPLOAD_BYTES_PER_WINDOW
       - THROW_PRO_EMAILS_PATH
       - THROW_FEEDBACK_PATH
       - THROW_LOG_HMAC_SECRET

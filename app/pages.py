@@ -426,7 +426,7 @@ JSON_LD: Final = """<script type="application/ld+json">
 {"@context":"https://schema.org","@type":"WebApplication",
 "name":"throw.dog","url":"https://throw.dog/",
 "applicationCategory":"UtilitiesApplication","operatingSystem":"Any (web browser)",
-"description":"Move text between devices in seconds: paste it, get two words and a QR, open it on the other device. No accounts, nothing stored.",
+"description":"Move text between devices in seconds: paste it, get two words and a QR, open it on the other device. No accounts, nothing kept.",
 "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
 "isAccessibleForFree":true,
 "featureList":["One-time read","10-minute expiry","Two-word codes","QR delivery","End-to-end encrypted mode"]}
@@ -1961,7 +1961,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proNet": "Network problem. Try again.",
         "title": "throw.dog — send text between devices in seconds",
         "ogLocale": "en_US",
-        "metaDescription": "Move text between devices in seconds: paste it, get two words and a QR, open on the other device. No accounts, no cookies, nothing stored — gone in 10 minutes.",
+        "metaDescription": "Move text between devices in seconds: paste it, get two words and a QR, open on the other device. No accounts, no cookies, nothing kept — gone in 10 minutes.",
         "getLabel": "Got a code? Fetch it here:",
         "getPlaceholder": "two words: basted lily — or paste a whole link",
         "getBtn": "fetch",
@@ -2037,7 +2037,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "proNet": "Проблема сети. Попробуй ещё раз.",
         "title": "throw.dog — перекинь текст между устройствами за секунды",
         "ogLocale": "ru_RU",
-        "metaDescription": "Перекинь текст между устройствами за секунды: вставь, получи два слова и QR, открой на другом устройстве. Без аккаунтов и куки, ничего не хранится — исчезает через 10 минут.",
+        "metaDescription": "Перекинь текст между устройствами за секунды: вставь, получи два слова и QR, открой на другом устройстве. Без аккаунтов и куки, ничего не остаётся — исчезает через 10 минут.",
         "getLabel": "Есть код? Забери здесь:",
         "getPlaceholder": "два слова: basted lily — или вставь ссылку целиком",
         "getBtn": "принести",
@@ -2346,9 +2346,9 @@ def _legal_page(
 
 
 _TERMS_BODY: Final = f"""    <h2>What this is</h2>
-    <p>throw.dog moves a piece of text from one device to another. Paste text,
-    get a short code and a QR, then open it on the other device. That is the
-    whole service — no accounts, no sign-up.</p>
+    <p>throw.dog moves a piece of text, or one file, from one device to another.
+    Paste text or drop a file, get a short code and a QR, then open it on the
+    other device. That is the whole service — no accounts, no sign-up.</p>
 
     <h2>Two modes, and what each one means</h2>
     <p>Before throwing, you choose the mode. In the <b>open</b> mode the throw is
@@ -2362,6 +2362,18 @@ _TERMS_BODY: Final = f"""    <h2>What this is</h2>
     <p>Because we never have the key, we cannot recover a closed throw for you,
     and we cannot help if the link is lost or truncated. That is the price of the
     guarantee, not an oversight.</p>
+
+    <h2>Files</h2>
+    <p>One file per throw. An open file may be up to 25 MB and a closed one up
+    to 100 MB, and the difference is deliberate: an open file sits on our disk
+    in a form we can read, so we keep less of it and for as short a time as
+    possible. A file is always served back as a download — never displayed in
+    the browser and never linkable from elsewhere — so this is not a place to
+    host anything.</p>
+    <p>Fetching a file with the code gives you a one-time pass to the bytes;
+    the code dies at that moment, exactly as it would for a text. The pass
+    survives a dropped connection long enough to resume the download, and then
+    the file is deleted.</p>
 
     <h2>One throw, one read</h2>
     <p>Each throw is held for about 10 minutes and is deleted the instant it is
@@ -2390,10 +2402,22 @@ _PRIVACY_BODY: Final = f"""    <h2>The short version</h2>
     <p>throw.dog is built to know as little about you as possible: no accounts,
     no tracking cookies, no profiling analytics, no ads.</p>
 
-    <h2>Your text</h2>
+    <h2>Your text and your files</h2>
     <p>The text you throw lives only in the server's memory, for about 10 minutes
-    at most, and is erased the moment it is handed out. Nothing is written to
-    disk and nothing is kept long-term. The content of a throw is never logged.</p>
+    at most, and is erased the moment it is handed out.</p>
+    <p>A file is too big for that, so a file is written to disk — and this is
+    the one place where saying "nothing is written to disk" would be a lie, so
+    we do not say it. A thrown file lives on our disk for at most 10 minutes,
+    counted from the moment it finishes arriving, and is deleted as soon as it
+    has been fetched or that time runs out, whichever comes first. There are no
+    backups; a restart of the service erases every file on it. In the
+    <b>closed</b> mode what is on that disk is ciphertext we cannot read, and
+    the file's own name is inside it, so we do not know that either. In the
+    <b>open</b> mode we can read the file, which is why open files are capped
+    far lower.</p>
+    <p>The content of a throw is never logged. Neither is a file's name, nor its
+    exact size — the log records that a throw of some size class was created or
+    read, and nothing that could identify it.</p>
     <p>In the <b>closed</b> mode what reaches us is ciphertext your browser
     produced (AES-256-GCM), and the key never reaches us at all: it travels in
     the fragment of the link — the part after the <code>#</code> — which browsers
@@ -2421,7 +2445,8 @@ _PRIVACY_BODY: Final = f"""    <h2>The short version</h2>
     <p>We keep minimal operational logs (for example, that a throw was created or
     read) to run the service and stop abuse. Throw codes are pseudonymized in
     logs with a keyed hash, so a log on its own cannot be turned back into a
-    working code, and the text is never included.</p>
+    working code, and neither the text, nor a file's name, nor its content is
+    ever included.</p>
 
     <h2>Cookies &amp; tracking</h2>
     <p>No cookies, no profiling, no third-party trackers, no ads. The homepage
@@ -2450,6 +2475,6 @@ PRIVACY_PAGE: Final = _legal_page(
     'Privacy <span class="hl">Policy</span>',
     _PRIVACY_BODY,
     "privacy",
-    "Privacy policy for throw.dog: no accounts, no cookies, nothing stored.",
+    "Privacy policy for throw.dog: no accounts, no cookies, nothing kept.",
     "Privacy Policy | throw.dog",
 )

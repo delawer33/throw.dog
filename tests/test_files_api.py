@@ -515,3 +515,55 @@ def test_a_file_creation_is_logged_by_shape_never_by_name(client, capsys):
     line = capsys.readouterr().out.strip()
     assert "event=created" in line and "kind=file" in line and "mode=open" in line
     assert "passport" not in line
+
+
+# --- the gates ---------------------------------------------------------------
+#
+# Two of stage two's four gates are things a test can hold shut for good; the
+# other two (50 MB across real networks, and the demo) are watched with a
+# stopwatch and cannot live here. These are the two that can.
+
+
+def test_a_bot_walking_the_code_space_never_reaches_an_open_file(client):
+    """Gate: an enumerator gets nothing, and the honest throw is untouched."""
+    code = put_file(client, b"somebody's passport scan", name="scan.jpg")
+    grant_url = None
+
+    # Every code in the space is two words; the bot has the same handle the
+    # receiver has and nothing else.
+    for guess in ("red-fox", "blue-cat", "basted-lily", "salty-dog", "wild-boar"):
+        if guess == code:
+            continue
+        response = take(client, guess)
+        assert response.status_code == 404
+        assert response.json() == {"detail": "no such throw"}
+
+    # Nor can it skip the code and go for the bytes: the ticket space is not
+    # reachable by hand, and a wrong one opens nothing.
+    for ticket in ("2abcdefghijkmn", "3zzzzzzzzzzzzz"):
+        assert client.get(f"/api/files/t/{ticket}").status_code == 404
+
+    # And the file is still there for the person who has the code.
+    grant_url = take(client, code).json()["url"]
+    assert client.get(grant_url).content == b"somebody's passport scan"
+
+
+def test_a_flood_of_uploads_hits_the_limit_before_it_hits_the_disk(limited, tmp_path):
+    """Gate: the disk holds under a flood, and an honest throw still lands."""
+    client = limited(max_concurrent=2, max_bytes_per_window=4 * 1024 * 1024)
+
+    accepted = 0
+    for _ in range(50):
+        response = client.post("/api/files", json={"size": 1024 * 1024, "chunks": 1})
+        if response.status_code == 201:
+            accepted += 1
+        else:
+            assert response.status_code == 429
+
+    assert accepted <= 4, "the flood was stopped by the limit, not by the disk"
+    assert client.app.state.files.total_bytes() <= 4 * 1024 * 1024
+
+    # The honest sender in the middle of all this: a text throw still crosses,
+    # and so does a read. The upload brake never touches the read path.
+    code = client.post("/api/throws", json={"text": "still working"}).json()["code"]
+    assert take(client, code).json() == {"text": "still working"}

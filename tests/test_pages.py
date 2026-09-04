@@ -617,3 +617,23 @@ def test_the_receiver_hands_a_file_over_instead_of_rendering_it():
     assert "tdUpload" not in page
     assert "fetch('/api/files'" not in page, "the receiver never starts an upload"
     assert page.count("fetch('/api/throws/") == 1
+
+
+def test_privacy_is_honest_about_the_disk_now_that_files_land_on_it():
+    # The old copy promised "nothing is written to disk". A file cannot honour
+    # that, so the promise is replaced by the true one rather than quietly
+    # narrowed (ADR 0005).
+    page = PRIVACY_PAGE
+    assert "nothing is written to disk" in page, "the old claim is named, not hidden"
+    assert "would be a lie" in page
+    assert "at most 10 minutes" in page
+    assert "backups" in page and "a restart of the service erases" in page
+    # And what the closed mode buys on that disk is said plainly.
+    assert "ciphertext we cannot read" in page
+
+
+def test_terms_say_what_a_file_throw_actually_is():
+    page = TERMS_PAGE
+    assert "One file per throw" in page
+    assert "25 MB" in page and "100 MB" in page
+    assert "never displayed in" in page, "an open file is a download, not a page"
