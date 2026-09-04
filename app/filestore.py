@@ -199,7 +199,9 @@ class FileStore:
             in use. Text throws and file throws share one address space (a
             receiver types two words and does not know which kind is behind
             them), so each store has to be able to see the other's live codes.
-        max_entries: how many uploads and throws may be alive at once.
+        max_entries: how many throws may be alive at once, counting all three
+            stages — a file being uploaded, a file waiting for its code, and a
+            file being downloaded all occupy the box.
         max_total_bytes: how many declared bytes may be reserved at once.
     """
 
@@ -295,7 +297,8 @@ class FileStore:
         path = self._path_for(upload_id)
         with self._lock:
             self._purge_expired(now)
-            if len(self._uploads) + len(self._entries) >= self._max_entries:
+            live = len(self._uploads) + len(self._entries) + len(self._tickets)
+            if live >= self._max_entries:
                 raise StoreFull("too many live throws")
             if self._reserved_bytes + size > self._max_total_bytes:
                 raise StoreFull("live throws would exceed the disk ceiling")
@@ -344,14 +347,18 @@ class FileStore:
             with open(upload.path, "ab") as sink:
                 sink.write(data)
             with self._lock:
-                # Re-check: the sweeper may have dropped the upload (and its
-                # file) while this chunk was in flight.
-                if self._uploads.get(upload_id) is not upload:
-                    raise NoSuchUpload(upload_id)
-                upload.received_bytes += len(data)
-                upload.next_chunk += 1
-                upload.touched_at = self._clock()
-                return upload.received_bytes
+                still_ours = self._uploads.get(upload_id) is upload
+                if still_ours:
+                    upload.received_bytes += len(data)
+                    upload.next_chunk += 1
+                    upload.touched_at = self._clock()
+                    return upload.received_bytes
+        # The sweeper dropped this upload while the chunk was in flight, and
+        # unlinked its file — which the append above has just brought back,
+        # under a name nothing refers to any more. Take it away again: a file
+        # nobody can reach is exactly the thing that must not accumulate.
+        _unlink(upload.path)
+        raise NoSuchUpload(upload_id)
 
     def finish(self, upload_id: str) -> Filed:
         """Turn a completed upload into a live throw and return its address.

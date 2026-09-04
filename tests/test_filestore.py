@@ -37,6 +37,27 @@ def sequence(*codes: str):
     return generate
 
 
+class _Gate:
+    """Stands in for an upload's write lock, held shut until the test says go.
+
+    It is how the test stops a chunk at the one instant that matters: past its
+    checks, not yet written.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.reached = threading.Event()
+        self.go = threading.Event()
+
+    def __enter__(self):
+        self.reached.set()
+        self.go.wait(5)
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+
 def make_store(tmp_path, **kwargs) -> FileStore:
     kwargs.setdefault("clock", FakeClock())
     store = FileStore(tmp_path / "throws", **kwargs)
@@ -378,3 +399,46 @@ def test_only_one_of_many_racing_receivers_gets_the_ticket(tmp_path):
         thread.join()
 
     assert len(grants) == 1
+
+
+def test_a_chunk_landing_after_the_sweep_leaves_no_orphan_behind(tmp_path):
+    """A chunk that was already past the checks when the sweeper struck.
+
+    The window is narrow and entirely real on a slow network: the write has
+    been accepted, the sweeper then drops the stalled upload and unlinks its
+    file, and the append that follows quietly *recreates* it — under a name
+    nothing refers to any more, so nothing would ever delete it again.
+
+    Forcing that interleaving means holding the upload's own write lock, which
+    has no public handle; reaching for it is the price of testing the race at
+    all, and the race is worth testing because its cost is a disk that fills up
+    with files nobody can reach.
+    """
+    clock = FakeClock()
+    store = make_store(tmp_path, clock=clock, upload_idle_seconds=120)
+    upload_id = store.begin(size=8, chunks=2)
+    store.write_chunk(upload_id, 0, b"abcd")
+
+    gate = _Gate(store._uploads[upload_id].writing)
+    store._uploads[upload_id].writing = gate
+    outcome = []
+
+    def late_chunk() -> None:
+        try:
+            store.write_chunk(upload_id, 1, b"efgh")
+            outcome.append("written")
+        except NoSuchUpload:
+            outcome.append("refused")
+
+    writer = threading.Thread(target=late_chunk, daemon=True)
+    writer.start()
+    assert gate.reached.wait(5), "the chunk is past its checks, not yet written"
+
+    clock.advance(121)
+    assert store.purge_expired() == 1, "the sweeper took the upload and its file"
+
+    gate.go.set()  # now let the write land, on a path nothing points at
+    writer.join(timeout=5)
+
+    assert outcome == ["refused"]
+    assert list(store.root.iterdir()) == [], "and left nothing behind"

@@ -1802,15 +1802,10 @@ var T = @@__T__@@;
     link.click();
   }
 
+  // An open file needs no unwrapping: the server is already answering with
+  // ``attachment``, so the bytes go straight from that address to the disk.
   function showFile(data) {
-    var link = document.getElementById('download');
-    link.href = data.url;
-    if (data.name) { link.setAttribute('download', data.name); }
-    document.getElementById('filename').textContent =
-      (data.name || '') + (data.name ? ' · ' : '') + tdSize(data.size);
-    status.hidden = true;
-    document.getElementById('fileresult').hidden = false;
-    link.click();
+    handOver(data.url, data.name, data.size);
   }
 
   // The key leaves the address bar the moment its fate is settled, and not

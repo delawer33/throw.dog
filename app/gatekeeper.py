@@ -282,18 +282,28 @@ class UploadLimiter:
             del self._declared[ip]
 
     def _sweep_if_crowded(self, now: float) -> None:
-        """Reclaim fully-drained buckets once the maps are crowded."""
-        if len(self._active) > self._max_tracked_ips:
-            for ip in [
-                ip
-                for ip, active in self._active.items()
-                if not active or active[-1] <= now - self._slot_ttl_seconds
-            ]:
-                del self._active[ip]
-        if len(self._declared) > self._max_tracked_ips:
-            for ip in [
-                ip
-                for ip, declared in self._declared.items()
-                if not declared or declared[-1][0] <= now - self._window_seconds
-            ]:
-                del self._declared[ip]
+        """Reclaim fully-drained buckets once either map is crowded.
+
+        Same job as the gate's sweep above, and for the same reason: a spray of
+        one-shot IPs leaves a bucket each that nothing else ever revisits.
+        """
+        _sweep(self._active, self._max_tracked_ips, now - self._slot_ttl_seconds,
+               lambda entry: entry)
+        _sweep(self._declared, self._max_tracked_ips, now - self._window_seconds,
+               lambda entry: entry[0])
+
+
+def _sweep(buckets: dict, ceiling: int, cutoff: float, stamp) -> None:
+    """Drop every bucket whose newest entry is older than ``cutoff``.
+
+    Only once the map is over its ceiling: this is O(tracked IPs), and paying
+    it on every request would be its own kind of denial of service.
+    """
+    if len(buckets) <= ceiling:
+        return
+    for key in [
+        key
+        for key, entries in buckets.items()
+        if not entries or stamp(entries[-1]) <= cutoff
+    ]:
+        del buckets[key]

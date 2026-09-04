@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
@@ -38,6 +39,7 @@ from app.codewords import normalize
 from app.csp import FLOOR_POLICY
 from app.filestore import (
     BadChunk,
+    Checkout,
     FileStore,
     NoSuchUpload,
     UploadIncomplete,
@@ -110,9 +112,10 @@ DEFAULT_PRO_EMAILS_PATH = "/data/pro-emails.txt"
 #: 254 chars; anything longer is junk and never touches the file.
 _MAX_EMAIL_LEN = 254
 
-#: A Pro-interest request body is tiny — a single email in a JSON object. Cap the
-#: bytes we read so the endpoint can't be used to buffer a flood.
-_PRO_BODY_MAX_BYTES = 4096
+#: The cap on the small JSON bodies: a Pro-interest email, and the metadata that
+#: opens an upload. Both are a handful of fields, and reading no more than this
+#: is what stops either endpoint being used to buffer a flood.
+_SMALL_BODY_MAX_BYTES = 4096
 
 #: Where free-form user feedback (the wish box in the Pro panel) is appended.
 #: Same posture as the emails: docker-volume file, one line per record.
@@ -186,10 +189,16 @@ def encrypted_plaintext_bytes(text: str) -> int | None:
 
 # --- serving the bytes ------------------------------------------------------
 
-#: Sentinel for a Range header that names bytes the file does not have. Distinct
-#: from ``None`` (no Range at all), because the two produce different answers:
-#: one is a whole file, the other a 416.
-UNSATISFIABLE = object()
+class Unsatisfiable:
+    """A Range header naming bytes the file does not have.
+
+    Its own type rather than ``None``, because the two mean different answers:
+    no range at all is a whole file, an impossible range is a 416.
+    """
+
+
+#: The one instance of it; compared by identity.
+UNSATISFIABLE = Unsatisfiable()
 
 #: How many bytes of a download go by before we tell the store the ticket is
 #: still moving. A 100 MB file over a slow link outlives the idle window many
@@ -202,7 +211,7 @@ _TOUCH_EVERY_BYTES = 4 * 1024 * 1024
 _FALLBACK_FILENAME = "throw.bin"
 
 
-def parse_range(header: str | None, size: int) -> tuple[int, int] | None | object:
+def parse_range(header: str | None, size: int) -> tuple[int, int] | None | Unsatisfiable:
     """Interpret a ``Range`` header: a span, no range at all, or unsatisfiable.
 
     Only a single byte range is honoured. Resuming a dropped download is the
@@ -292,7 +301,9 @@ def content_disposition(name: str | None) -> str:
     return f"attachment; filename=\"{_FALLBACK_FILENAME}\"; filename*=UTF-8''{encoded}"
 
 
-def _stream_file(files, ticket: str, held, start: int, end: int):
+def _stream_file(
+    files: FileStore, ticket: str, held: Checkout, start: int, end: int
+) -> Iterator[bytes]:
     """Yield ``[start, end]`` of a checked-out file, block by block.
 
     Never reads the file into memory: a 100 MB download costs one block at a
@@ -1077,7 +1088,7 @@ def create_app(
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > _PRO_BODY_MAX_BYTES:
+            if len(body) > _SMALL_BODY_MAX_BYTES:
                 return JSONResponse({"detail": "request too large"}, status_code=413)
         try:
             payload = json.loads(body)
@@ -1154,9 +1165,7 @@ def create_app(
         except (ValueError, OSError):
             uploads.finish(ip)
             return JSONResponse({"detail": "malformed request"}, status_code=400)
-        return JSONResponse(
-            {"upload": upload, "chunk": FILE_CHUNK_BYTES}, status_code=201
-        )
+        return JSONResponse({"upload": upload}, status_code=201)
 
     @app.put("/api/files/{upload}/{index}")
     async def put_chunk(upload: str, index: int, request: Request) -> Response:
@@ -1257,7 +1266,7 @@ def create_app(
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > _PRO_BODY_MAX_BYTES:
+            if len(body) > _SMALL_BODY_MAX_BYTES:
                 return JSONResponse({"detail": "request too large"}, status_code=413)
         try:
             payload = json.loads(body)
