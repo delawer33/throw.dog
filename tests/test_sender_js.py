@@ -45,6 +45,11 @@ globalThis.navigator = {};
 const posted = [];
 const els = {};
 const handlers = {};
+// The card the drop zone listens on. This file is about the text path, so
+// nothing ever fires on it — it only has to exist for the page to wire up.
+const card = {
+  addEventListener: function (event, fn) { handlers['card:' + event] = fn; }
+};
 globalThis.document = {
   getElementById: function (id) {
     if (!els[id]) {
@@ -53,6 +58,8 @@ globalThis.document = {
         disabled: false, offsetWidth: 1,
         classList: { add: function () {}, remove: function () {} },
         addEventListener: function (event, fn) { handlers[id + ':' + event] = fn; },
+        closest: function () { return card; },
+        style: {},
         focus: function () {}
       };
     }
@@ -61,12 +68,39 @@ globalThis.document = {
 };
 
 globalThis.fetch = function (url, options) {
-  posted.push({ url: url, body: JSON.parse(options.body) });
+  if (options.method === 'PUT') {
+    // A sealed chunk: keep the bytes themselves, that is the whole point.
+    posted.push({ url: url, bytes: Array.from(options.body) });
+    return Promise.resolve({ status: 204, ok: true });
+  }
+  posted.push({ url: url, body: options.body ? JSON.parse(options.body) : null });
+  if (url === '/api/files') {
+    return Promise.resolve({
+      status: 201, ok: true,
+      json: function () { return Promise.resolve({ upload: 'u', chunk: TD_CHUNK }); }
+    });
+  }
   return Promise.resolve({
     status: 201, ok: true,
     json: function () { return Promise.resolve({ code: '9r6er8ieht7srq' }); }
   });
 };
+
+// A stand-in File. Small on purpose: the format is proven byte for byte in
+// test_file_crypto_js, and what is under test here is the request the page
+// makes and what it does NOT put in it.
+const FILE_BYTES = new TextEncoder().encode(process.env.SECRET || '');
+function fakeFile(name) {
+  return {
+    size: FILE_BYTES.length, name: name, type: 'text/plain',
+    slice: function (from, to) {
+      const part = FILE_BYTES.slice(from, to);
+      return { size: part.length,
+               arrayBuffer: function () { return Promise.resolve(part.buffer.slice(
+                 part.byteOffset, part.byteOffset + part.byteLength)); } };
+    }
+  };
+}
 
 const SCENARIO = process.env.SCENARIO;
 const SECRET = process.env.SECRET;
@@ -83,6 +117,11 @@ async function main() {
     handlers['text:paste']({
       preventDefault: function () {},
       clipboardData: { getData: function () { return SECRET; } }
+    });
+  } else if (SCENARIO === 'file') {
+    handlers['card:drop']({
+      preventDefault: function () {},
+      dataTransfer: { files: [fakeFile('secrets.txt')] }
     });
   } else if (SCENARIO === 'paste_closed_link') {
     handlers['text:paste']({
@@ -108,6 +147,7 @@ async function main() {
   }
 
   process.stdout.write(JSON.stringify({
+    posted: posted,
     posts: posted.length,
     url: posted.length ? posted[0].url : null,
     body: posted.length ? posted[0].body : null,
@@ -132,8 +172,12 @@ def script(tmp_path_factory):
     blocks = re.findall(r"<script>(.*?)</script>", CLOSED_SENDER_PAGE, re.S)
     assert len(blocks) == 1, "the closed sender must carry exactly one script"
     body = blocks[0]
-    # Its main IIFE runs on load; wrap it so the harness installs its stubs first.
-    wrapped = body.replace("(function () {", "function PAGE_SCRIPT() {(function () {", 1)
+    # Its main IIFE runs on load; wrap it so the harness installs its stubs
+    # first. It is found by starting at column zero — the shared file code has
+    # callbacks that read the same as an IIFE anywhere else in the line.
+    opener = re.search(r"^\(function \(\) \{", body, re.M)
+    assert opener, "unexpected shape for the page's IIFE"
+    wrapped = body[: opener.start()] + "function PAGE_SCRIPT() {" + body[opener.start() :]
     wrapped = wrapped.rstrip().rstrip(";")
     assert wrapped.endswith("})()"), "unexpected shape for the page's IIFE"
     path = tmp_path_factory.mktemp("senderjs") / "sender.js"
@@ -202,3 +246,42 @@ def test_pasting_one_of_our_own_closed_links_opens_it_instead_of_sending_it(scri
     out = run(script, "paste_closed_link", KEYISH="A" * 43)
     assert out["posts"] == 0, "the key was sent to the server"
     assert out["navigated"] == "/9r6er8ieht7srq#" + "A" * 43
+
+
+# --- files, in the mode where the server may not know what they are ---------
+
+
+def test_a_closed_file_reaches_us_only_as_sealed_chunks(script):
+    # The same claim as for text, on the path where it is harder to keep: a
+    # file is cut up and each piece sealed on the way out, so at no moment is
+    # there a request carrying what the sender picked.
+    out = run(script, "file")
+
+    puts = [r for r in out["posted"] if "bytes" in r]
+    assert puts, "nothing was uploaded"
+    body = bytes(b for put in puts for b in put["bytes"])
+    assert SECRET.encode("utf-8") not in body
+    assert b"secrets.txt" not in body, "the name is content too"
+
+
+def test_the_upload_declares_the_format_and_the_size_it_really_is(script):
+    out = run(script, "file")
+    start = out["posted"][0]
+
+    assert start["url"] == "/api/files"
+    assert start["body"]["enc"] == "aes-gcm-file-v1"
+    # The plaintext size the limit is about, and the wire size the server has
+    # to make room for. The server refuses a pair that does not add up.
+    assert start["body"]["plain"] == len(SECRET.encode("utf-8"))
+    assert start["body"]["size"] > start["body"]["plain"]
+    assert start["body"]["chunks"] == 2, "the sealed header, then one chunk"
+    # No name and no type: in this mode we are not told either.
+    assert "name" not in start["body"]
+    assert "mime" not in start["body"]
+
+
+def test_a_thrown_file_ends_on_the_same_card_a_thrown_text_does(script):
+    out = run(script, "file")
+    assert out["composeHidden"] is True
+    assert out["doneHidden"] is False
+    assert out["shownUrl"].count("#") == 1, "the key is in the fragment, as ever"

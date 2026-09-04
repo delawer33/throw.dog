@@ -141,8 +141,12 @@ def _page_script() -> str:
 def script(tmp_path_factory):
     body = _page_script()
     # The page's script ends in an IIFE that runs on load; wrap it so the
-    # harness can install its stubs first and then run it.
-    wrapped = body.replace("(function () {", "function PAGE_SCRIPT() {(function () {", 1)
+    # harness can install its stubs first and then run it. It is found by
+    # starting at column zero — the shared file code has callbacks that read
+    # the same as an IIFE anywhere else in the line.
+    opener = re.search(r"^\(function \(\) \{", body, re.M)
+    assert opener, "unexpected shape for the page's IIFE"
+    wrapped = body[: opener.start()] + "function PAGE_SCRIPT() {" + body[opener.start() :]
     wrapped = wrapped.rstrip().rstrip(";")
     assert wrapped.endswith("})()"), "unexpected shape for the page's IIFE"
     wrapped += ";}\n"

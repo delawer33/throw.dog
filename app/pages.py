@@ -624,6 +624,104 @@ function tdDecrypt(key, payload){
 """
 
 
+# A file cannot be one encrypt call: a 100 MB buffer through AES in a single
+# step puts a phone on the floor, and the result would have to exist twice in
+# memory anyway. So a closed file is a sequence of independently sealed chunks,
+# and the layout has to be pinned down here because two browsers have to agree
+# on it with nothing in between able to help them.
+#
+#     [0, 4)      the session's random IV prefix
+#     [4, 8)      how long the sealed header is, big-endian
+#     [8, 12)     how many sealed chunks follow the header
+#     [12, 12+H)  the sealed header: JSON with the name, the type and the size
+#     then        one sealed chunk per 4 MB of plaintext
+#
+# The chunk count sits in the clear because the receiver needs it before it can
+# open anything — it is part of every chunk's AAD, the header's included — and
+# it is not a secret from anyone: the server was told the same number when the
+# upload started. Being in the AAD is what makes it safe to read early: a count
+# altered in flight makes every tag in the file fail.
+#
+# The IV is the 4-byte prefix plus an 8-byte counter, so no two chunks of one
+# file — and no chunk of any other file — ever share one. The AAD carries the
+# chunk's own number AND how many there are: without it a chunk could be moved
+# to another position, or the tail simply cut off, and every remaining chunk
+# would still authenticate perfectly. The header is chunk zero of the same
+# sequence, so it cannot be lifted out of one file into another either.
+#
+# The scheme has its own version string, separate from the text one, because
+# the bytes are laid out differently. An unknown version is refused rather than
+# guessed at: a file decoded wrongly is worse than a file not decoded at all.
+_FILE_CRYPTO_JS: Final = """
+var TD_FILE_ENC = 'aes-gcm-file-v1';
+var TD_PREFIX_BYTES = 4, TD_TAG_BYTES = 16, TD_PREAMBLE_BYTES = 12;
+""" + r"""
+function tdBe32(value){
+  return new Uint8Array([(value >>> 24) & 255, (value >>> 16) & 255,
+                         (value >>> 8) & 255, value & 255]);
+}
+function tdReadBe32(bytes, at){
+  return ((bytes[at] << 24) >>> 0) + (bytes[at + 1] << 16) + (bytes[at + 2] << 8)
+    + bytes[at + 3];
+}
+// The IV: the session prefix, then this chunk's number. Eight bytes of counter
+// so the shape matches the spec; we never come close to needing more than four.
+function tdFileIv(prefix, index){
+  var iv = new Uint8Array(12);
+  iv.set(prefix, 0);
+  iv.set(tdBe32(index), 8);
+  return iv;
+}
+// What is authenticated but not encrypted: where this chunk sits, and how many
+// there are. Reordering or truncating the file breaks the tag.
+function tdFileAad(index, total){
+  var aad = new Uint8Array(8);
+  aad.set(tdBe32(index), 0);
+  aad.set(tdBe32(total), 4);
+  return aad;
+}
+function tdSealChunk(key, prefix, index, total, bytes){
+  return crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: tdFileIv(prefix, index), additionalData: tdFileAad(index, total) },
+    key, bytes
+  ).then(function (buffer) { return new Uint8Array(buffer); });
+}
+function tdOpenChunk(key, prefix, index, total, bytes){
+  return crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: tdFileIv(prefix, index), additionalData: tdFileAad(index, total) },
+    key, bytes
+  ).then(function (buffer) { return new Uint8Array(buffer); });
+}
+function tdNewPrefix(){
+  return crypto.getRandomValues(new Uint8Array(TD_PREFIX_BYTES));
+}
+// The first piece: the preamble and the sealed header. The name and the type
+// are in there because a file's name is content too — in this mode we do not
+// get to know what the sender is sending or what it is called.
+function tdSealHeader(key, prefix, total, meta){
+  var json = new TextEncoder().encode(JSON.stringify(meta));
+  return tdSealChunk(key, prefix, 0, total, json).then(function (sealed) {
+    var out = new Uint8Array(TD_PREAMBLE_BYTES + sealed.length);
+    out.set(prefix, 0);
+    out.set(tdBe32(sealed.length), 4);
+    out.set(tdBe32(total), 8);
+    out.set(sealed, TD_PREAMBLE_BYTES);
+    return out;
+  });
+}
+function tdPreamble(bytes){
+  return {
+    prefix: bytes.slice(0, TD_PREFIX_BYTES),
+    headerLength: tdReadBe32(bytes, 4),
+    chunks: tdReadBe32(bytes, 8)
+  };
+}
+function tdOpenHeader(key, preamble, sealed){
+  return tdOpenChunk(key, preamble.prefix, 0, preamble.chunks, sealed)
+    .then(function (plain) { return JSON.parse(new TextDecoder().decode(plain)); });
+}
+"""
+
 
 _TOP: Final = (
     '<div class="top"><a class="toplink" href="/" aria-label="throw.dog home">'
@@ -824,15 +922,71 @@ function tdSize(bytes){
 function tdLimitText(text, limit){ return text.replace('{limit}', tdSize(limit)); }
 """
 
-#: Sending a file, which only the two senders do. Deliberately not on the
-#: receiver: a page that can only take must carry no code for giving, and the
-#: receiver's one guarantee — it contacts the server exactly once, because
-#: contacting it is what spends the throw — is easiest to keep true when there
-#: is nothing else there that could call out.
-_UPLOAD_JS: Final = r"""
-// The progress card. It replaces the compose card rather than sitting under it:
-// while a file is moving there is nothing else to do on this page, and a live
-// textarea would invite a second throw on top of the first.
+#: Fetching a closed file back and opening it. Receiver-side only.
+#:
+#: The bytes come down one chunk per range request rather than in one stream:
+#: each sealed chunk has to be opened on its own anyway, a phone must never
+#: hold the whole file in memory before it can start, and a request that dies
+#: costs one chunk instead of the download. The server keeps the ticket alive
+#: while the ranges keep coming and retires it when the last byte goes out, so
+#: this is also what ends the throw.
+_DOWNLOAD_JS: Final = r"""
+function tdRange(url, from, to){
+  return fetch(url, { headers: { 'Range': 'bytes=' + from + '-' + to } })
+    .then(function (response) {
+      if (!response.ok) { throw new Error('range'); }
+      return response.arrayBuffer();
+    }).then(function (buffer) { return new Uint8Array(buffer); });
+}
+
+function tdFetchClosedFile(key, url, size, at){
+  var preamble, meta, parts = [], plainDone = 0;
+  return tdRange(url, 0, TD_PREAMBLE_BYTES - 1).then(function (head) {
+    preamble = tdPreamble(head);
+    return tdRange(url, TD_PREAMBLE_BYTES,
+                   TD_PREAMBLE_BYTES + preamble.headerLength - 1);
+  }).then(function (sealed) {
+    return tdOpenHeader(key, preamble, sealed);
+  }).then(function (header) {
+    meta = header;
+    var at0 = TD_PREAMBLE_BYTES + preamble.headerLength;
+    var chain = Promise.resolve();
+    for (var index = 0; index < preamble.chunks; index++) {
+      (function (i, from) {
+        var plain = Math.min(TD_CHUNK, meta.size - i * TD_CHUNK);
+        var sealedLength = plain + TD_TAG_BYTES;
+        chain = chain.then(function () {
+          return tdRange(url, from, from + sealedLength - 1);
+        }).then(function (sealed) {
+          return tdOpenChunk(key, preamble.prefix, i + 1, preamble.chunks, sealed);
+        }).then(function (opened) {
+          // Straight into the Blob's parts: the browser is free to spill them
+          // to disk, which is the only way a 100 MB file survives a phone.
+          parts.push(opened);
+          plainDone += opened.length;
+          at(plainDone, meta.size);
+        });
+      })(index, at0);
+      at0 += Math.min(TD_CHUNK, meta.size - index * TD_CHUNK) + TD_TAG_BYTES;
+    }
+    return chain;
+  }).then(function () {
+    if (plainDone !== meta.size) { throw new Error('short'); }
+    return {
+      blob: new Blob(parts, { type: meta.mime || 'application/octet-stream' }),
+      name: meta.name,
+      size: meta.size
+    };
+  });
+}
+"""
+
+#: The progress card, which every page that moves a file needs: a big file takes
+#: minutes on both ends, and minutes with no feedback read as a hang.
+_FILE_PROGRESS_JS: Final = r"""
+// It replaces whatever it is given rather than sitting under it: while a file
+// is moving there is nothing else to do on the page, and a live textarea would
+// invite a second throw on top of the first.
 function tdProgress(compose, title, name){
   var prog = document.getElementById('prog');
   document.getElementById('progtitle').textContent = title;
@@ -848,6 +1002,20 @@ function tdProgress(compose, title, name){
     done: function () { prog.hidden = true; },
     back: function () { prog.hidden = true; compose.hidden = false; }
   };
+}
+"""
+
+#: Taking a file in — by drop or by dialog — and cutting it up. Sender-side
+#: only, like the upload itself.
+_FILE_INPUT_JS: Final = r"""
+// The fixed chunking, in one place: both senders cut the file the same way, and
+// the receiver of a closed file counts on the pieces being exactly this size.
+function tdSlice(file){
+  var slices = [];
+  for (var at = 0; at < file.size; at += TD_CHUNK) {
+    slices.push(file.slice(at, Math.min(at + TD_CHUNK, file.size)));
+  }
+  return slices;
 }
 
 // A file is thrown by dropping it, exactly as a text is thrown by pasting it.
@@ -877,10 +1045,22 @@ function tdWireDrop(card, input, onFile){
     if (dropped && dropped.length === 1) { onFile(dropped[0]); }
   });
 }
+"""
+
+#: The three upload handles. Deliberately absent from the receiver: a page that
+#: can only take should carry no code for giving, and the receiver's one
+#: guarantee — it contacts the server exactly once, because contacting it is
+#: what spends the throw — is easiest to keep true when nothing else there
+#: could call out.
+_UPLOAD_JS: Final = r"""
 
 // The three handles, in order. The address does not exist until the last one
 // answers, which is the whole reason there are three: a code handed out early
 // sends the receiver to a throw that is still arriving.
+//
+// A piece is ``{size, make}`` rather than a blob: the closed sender seals each
+// chunk only when it is about to go, so a whole file is never encrypted into
+// memory at once. The open sender's ``make`` just hands back the slice.
 function tdUpload(start, pieces, at){
   var total = pieces.reduce(function (sum, piece) { return sum + piece.size; }, 0);
   var upload;
@@ -904,10 +1084,12 @@ function tdUpload(start, pieces, at){
       // order on any real network, and the server appends what it is given.
       return pieces.reduce(function (chain, piece, index) {
         return chain.then(function () {
+          return piece.make();
+        }).then(function (body) {
           return fetch('/api/files/' + upload + '/' + index, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/octet-stream' },
-            body: piece
+            body: body
           }).then(null, function () { throw new Error('net'); });
         }).then(function (response) {
           if (!response.ok) { fail(response); }
@@ -1114,7 +1296,7 @@ var T = @@__T__@@;
 // mode the visitor settled on. Only an explicit act — the switch, a throw —
 // may write it there.
 var TD_IS_LANDING = @@isLanding@@;
-""" + _QR_JS + _CRYPTO_CHECK_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + _FILE_SIZE_JS + _UPLOAD_JS + """
+""" + _QR_JS + _CRYPTO_CHECK_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + _FILE_SIZE_JS + _FILE_PROGRESS_JS + _FILE_INPUT_JS + _UPLOAD_JS + """
 (function () {""" + _COMPOSE_JS + """
   var codebig = document.getElementById('codebig');
 
@@ -1198,10 +1380,9 @@ var TD_IS_LANDING = @@isLanding@@;
     }
     busy = true;
     error.hidden = true;
-    var pieces = [];
-    for (var at = 0; at < file.size; at += TD_CHUNK) {
-      pieces.push(file.slice(at, Math.min(at + TD_CHUNK, file.size)));
-    }
+    var pieces = tdSlice(file).map(function (slice) {
+      return { size: slice.size, make: function () { return Promise.resolve(slice); } };
+    });
     var bar = tdProgress(compose, T.uploading, file.name);
     bar.at(0, file.size);
     tdUpload({
@@ -1368,7 +1549,7 @@ _CLOSED_SENDER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
 var T = @@__T__@@;
 // Same rule as the open sender: a landing visit never writes the mode.
 var TD_IS_LANDING = @@isLanding@@;
-""" + _QR_JS + _CRYPTO_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + """
+""" + _QR_JS + _CRYPTO_JS + _FILE_CRYPTO_JS + _CLOSED_RE_JS + _OWN_LINK_JS + _STORAGE_JS + _FILE_SIZE_JS + _FILE_PROGRESS_JS + _FILE_INPUT_JS + _UPLOAD_JS + """
 (function () {""" + _COMPOSE_JS + """
   if (!TD_IS_LANDING) { tdRemember('closed'); }
   text.value = tdTakeDraft();
@@ -1420,16 +1601,7 @@ var TD_IS_LANDING = @@isLanding@@;
       return response.json();
     }).then(function (data) {
       return tdExportKey(key).then(function (encoded) {
-        // The key goes in the fragment and nowhere else. Fragments are not sent
-        // with any request, so this URL is the only copy in existence.
-        currentUrl = window.location.origin + '/' + data.code + '#' + encoded;
-        var svg = qrSVG(currentUrl);
-        qrEl.innerHTML = svg;
-        qrEl.hidden = !svg;
-        urlEl.textContent = currentUrl.replace(/^https?:\\/\\//, '');
-        compose.hidden = true;
-        done.hidden = false;
-        throwAnim();
+        showThrown(data.code, encoded);
       });
     }).catch(function (err) {
       fail(err && err.message ? err.message : T.netSend);
@@ -1437,6 +1609,90 @@ var TD_IS_LANDING = @@isLanding@@;
       busy = false;
     });
   }
+
+  // The key goes in the fragment and nowhere else. Fragments are not sent with
+  // any request, so this URL is the only copy of it in existence.
+  function showThrown(code, encoded) {
+    currentUrl = window.location.origin + '/' + code + '#' + encoded;
+    var svg = qrSVG(currentUrl);
+    qrEl.innerHTML = svg;
+    qrEl.hidden = !svg;
+    urlEl.textContent = currentUrl.replace(/^https?:\\/\\//, '');
+    compose.hidden = true;
+    done.hidden = false;
+    throwAnim();
+  }
+
+  // A closed file, sealed a chunk at a time. One encrypt call over 100 MB would
+  // put a phone on the floor and need the whole file in memory twice; each
+  // chunk is sealed only as it is about to leave, so neither happens.
+  function sendFile(file) {
+    if (busy) { return; }
+    if (!file.size) { fail(T.fileEmpty); return; }
+    if (file.size > TD_CLOSED_MAX) {
+      fail(tdLimitText(T.fileTooBig, TD_CLOSED_MAX));
+      return;
+    }
+    if (!tdCryptoReady()) { fail(T.noCrypto); return; }
+    busy = true;
+    error.hidden = true;
+    var slices = tdSlice(file);
+    var prefix = tdNewPrefix();
+    var key;
+    // The progress bar counts plaintext, not what goes on the wire: the sender
+    // is watching their own file move, and the packaging is our business.
+    var bar = tdProgress(compose, T.uploading, file.name);
+    bar.at(0, file.size);
+    tdNewKey().then(function (fresh) {
+      key = fresh;
+      // The name and the type go inside the header, because a file's name is
+      // content too: in this mode we do not learn what was sent or what it was
+      // called.
+      return tdSealHeader(key, prefix, slices.length, {
+        name: file.name, mime: file.type || '', size: file.size
+      });
+    }).then(function (head) {
+      var pieces = [{
+        size: head.length,
+        make: function () { return Promise.resolve(head); }
+      }];
+      slices.forEach(function (slice, index) {
+        pieces.push({
+          size: slice.size + TD_TAG_BYTES,
+          make: function () {
+            return slice.arrayBuffer().then(function (buffer) {
+              return tdSealChunk(
+                key, prefix, index + 1, slices.length, new Uint8Array(buffer)
+              );
+            });
+          }
+        });
+      });
+      var wire = pieces.reduce(function (sum, piece) { return sum + piece.size; }, 0);
+      return tdUpload({
+        enc: TD_FILE_ENC,
+        plain: file.size,
+        size: wire,
+        chunks: pieces.length
+      }, pieces, function (sent, total) { bar.at(sent, total); });
+    }).then(function (data) {
+      return tdExportKey(key).then(function (encoded) {
+        bar.done();
+        showThrown(data.code, encoded);
+      });
+    }).catch(function (err) {
+      bar.back();
+      var reason = err && err.message;
+      if (reason === 'too-big') { fail(tdLimitText(T.fileTooBig, TD_CLOSED_MAX)); }
+      else if (reason === 'busy') { fail(T.uploadBusy); }
+      else if (reason === 'net') { fail(T.netSend); }
+      else { fail(T.uploadFailed); }
+    }).then(function () {
+      busy = false;
+    });
+  }
+
+  tdWireDrop(text.closest('.card'), document.getElementById('file'), sendFile);
 
 """ + _compose_wiring_js(track=False) + _get_card_js(track=False) + """})();
 </script>
@@ -1462,6 +1718,8 @@ _RECEIVER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
         <button class="btn ghost" id="copy" type="button">@@copyBtn@@</button>
       </div>
 
+""" + _PROGRESS_CARD + """
+
       <div id="fileresult" hidden>
         <p class="donelabel">@@fileReady@@</p>
         <p class="progname" id="filename"></p>
@@ -1478,7 +1736,7 @@ _RECEIVER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
 
 <script>
 var T = @@__T__@@;
-""" + _CRYPTO_JS + _CLOSED_RE_JS + _FILE_SIZE_JS + """
+""" + _CRYPTO_JS + _FILE_CRYPTO_JS + _CLOSED_RE_JS + _FILE_SIZE_JS + _FILE_PROGRESS_JS + _DOWNLOAD_JS + """
 (function () {
   var status = document.getElementById('status');
   var result = document.getElementById('result');
@@ -1512,6 +1770,38 @@ var T = @@__T__@@;
   // The download starts by itself and the button stays: on a browser that
   // blocked the automatic navigation, the throw is already spent, and leaving
   // the reader with no way to the bytes would be the worst possible ending.
+  // A closed file is fetched, opened and only then handed over: nothing of it
+  // is ever readable by us, and nothing of it is shown in this tab either.
+  // A wrong key, a reordered chunk or a truncated tail all fail the same way,
+  // loudly — GCM sees to that — rather than saving half a broken file.
+  function showClosedFile(imported, data) {
+    if (data.enc !== TD_FILE_ENC) { fail(T.wrong); return; }
+    var bar = tdProgress(status, T.downloading, '');
+    bar.at(0, data.size);
+    tdFetchClosedFile(imported, data.url, data.size, bar.at).then(function (got) {
+      bar.done();
+      handOver(URL.createObjectURL(got.blob), got.name, got.size);
+    }, function () {
+      bar.done();
+      fail(T.keyBad);
+    });
+  }
+
+  // The one place a file leaves this page, whichever mode it came in. The
+  // download starts by itself and the button stays: on a browser that blocked
+  // the automatic navigation the throw is already spent, and leaving the
+  // reader with no way to the bytes would be the worst possible ending.
+  function handOver(href, name, size) {
+    var link = document.getElementById('download');
+    link.href = href;
+    if (name) { link.setAttribute('download', name); }
+    document.getElementById('filename').textContent =
+      (name || '') + (name ? ' · ' : '') + tdSize(size);
+    status.hidden = true;
+    document.getElementById('fileresult').hidden = false;
+    link.click();
+  }
+
   function showFile(data) {
     var link = document.getElementById('download');
     link.href = data.url;
@@ -1551,6 +1841,7 @@ var T = @@__T__@@;
         if (!data.enc) { show(data.text); return; }
         if (!imported) { fail(T.keyBad); return; }
         chip.textContent = T.chipClosed;
+        if (data.kind === 'file') { showClosedFile(imported, data); return; }
         // Past this point the throw is spent whatever happens: we asked, and we
         // were given it. A key that does not fit says so plainly, because the
         // reader's next move is to ask for a new throw, not to reload.

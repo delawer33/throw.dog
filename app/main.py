@@ -336,8 +336,11 @@ def _stream_file(files, ticket: str, held, start: int, end: int):
 ENC_FILE_SCHEME = "aes-gcm-file-v1"
 
 #: Bytes of preamble before the first sealed chunk: the 4-byte random IV prefix
-#: for the session, and a 4-byte length for the sealed header that follows.
-_FILE_PREAMBLE_BYTES = 8
+#: for the session, a 4-byte length for the sealed header, and the number of
+#: chunks that follow it. All three are in the clear, and none of them is a
+#: secret — but each is authenticated by every tag in the file, so none can be
+#: changed on the way through us without every chunk failing to open.
+_FILE_PREAMBLE_BYTES = 12
 
 #: The most the sealed header (the JSON with name, mime and size) may weigh.
 #: It is metadata, not content: a filename that needs four kilobytes is not a

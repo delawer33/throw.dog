@@ -14,6 +14,7 @@ from app.closedaddress import generate as generate_address
 from app.main import create_app
 from app.pages import (
     ANALYTICS_HOST,
+    _STORAGE_JS,
     ANALYTICS_WEBSITE_ID,
     CLOSED_SENDER_PAGE,
     KEY_BEARING_PAGES,
@@ -347,8 +348,13 @@ def test_a_draft_survives_a_mode_switch_without_touching_the_url_or_us():
         assert "tdTakeDraft()" in page
     # The draft never becomes part of an address or a request body.
     assert "td_draft=" not in SENDER_PAGE
-    assert "td_draft" not in CLOSED_SENDER_PAGE.split("JSON.stringify")[1]
     assert "td_draft" not in RECEIVER_PAGE
+    # The key names the draft's storage slot and nothing else: every mention of
+    # it on either sender is inside the storage helpers, so it cannot have found
+    # its way into an address or a request body.
+    for page in (SENDER_PAGE, CLOSED_SENDER_PAGE):
+        assert _STORAGE_JS in page
+        assert page.count("td_draft") == _STORAGE_JS.count("td_draft")
 
 
 def test_closed_mode_unavailable_is_shown_with_its_reason():
@@ -385,7 +391,7 @@ def test_the_closed_sender_encrypts_before_it_ever_calls_us():
 
 def test_the_key_goes_in_the_fragment_and_only_there():
     page = CLOSED_SENDER_PAGE
-    assert "'/' + data.code + '#' + encoded" in page
+    assert "'/' + code + '#' + encoded" in page
     # Never a query parameter, never a path segment, never a body field.
     assert "?key=" not in page
     assert "key: " not in page
@@ -496,8 +502,10 @@ def test_the_receiver_decrypts_locally_and_never_asks_us_to():
     assert page.index("tdDecrypt(imported, data.text)") > page.index(
         "fetch('/api/throws/"
     )
-    # No second request anywhere: the key is never sent to be checked.
-    assert page.count("fetch(") == 1
+    # The throw is asked for exactly once, and the key is never sent to be
+    # checked: whatever else the page fetches (a closed file's bytes) can only
+    # happen after that answer is already in hand.
+    assert page.count("fetch('/api/throws/") == 1
 
 
 # --- fetch-by-code accepts a whole closed link ------------------------------
@@ -581,15 +589,6 @@ def test_both_senders_take_a_file_in_either_language(lang):
         assert STRINGS[lang]["dropLabel"] in page
 
 
-def test_each_sender_prints_its_own_size_limit():
-    # The two are deliberately different (ADR 0005): an open file is one we can
-    # read and hold, a closed one is ciphertext. A page printing the other's
-    # number would promise what it then refuses.
-    assert "25 MB" in render_sender("en")
-    assert "100 MB" not in render_sender("en")
-    assert "100 MB" in render_closed_sender("en")
-
-
 @pytest.mark.parametrize(
     "render,limit",
     [(render_sender, "25 MB"), (render_closed_sender, "100 MB")],
@@ -603,13 +602,18 @@ def test_the_drop_note_names_a_real_size_not_a_placeholder(render, limit):
         assert note, "the drop zone lost its note"
         assert "{limit}" not in note.group(1)
         assert limit in note.group(1)
+        # And never the other mode's number: the two limits are deliberately
+        # different (ADR 0005), so a page that printed the wrong one would
+        # promise what it then refuses.
+        assert ("100 MB" if limit == "25 MB" else "25 MB") not in note.group(1)
 
 
 def test_the_receiver_hands_a_file_over_instead_of_rendering_it():
     page = RECEIVER_PAGE
     assert 'id="download"' in page
     assert "download" in page
-    # No code for sending anything: the receiver only ever takes, and its one
-    # guarantee is that it contacts the server exactly once.
+    # No code for sending anything: the receiver only ever takes. The request
+    # that spends the throw is still the only one of its kind.
     assert "tdUpload" not in page
-    assert page.count("fetch(") == 1
+    assert "fetch('/api/files'" not in page, "the receiver never starts an upload"
+    assert page.count("fetch('/api/throws/") == 1
