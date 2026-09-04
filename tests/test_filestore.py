@@ -39,7 +39,9 @@ def sequence(*codes: str):
 
 def make_store(tmp_path, **kwargs) -> FileStore:
     kwargs.setdefault("clock", FakeClock())
-    return FileStore(tmp_path / "throws", **kwargs)
+    store = FileStore(tmp_path / "throws", **kwargs)
+    store.prepare()
+    return store
 
 
 def upload(store: FileStore, payload: bytes, chunk_size: int = 8, **kwargs) -> str:
@@ -306,12 +308,20 @@ def test_no_address_is_readable_from_the_directory(tmp_path):
     assert grant.ticket not in names[0]
 
 
+def test_constructing_the_store_touches_no_disk(tmp_path):
+    """``app.main`` builds one at import time; import must not make a directory."""
+    root = tmp_path / "throws"
+    FileStore(root, clock=FakeClock())
+    assert not root.exists()
+
+
 def test_the_directory_is_emptied_on_startup(tmp_path):
     root = tmp_path / "throws"
     root.mkdir()
     (root / "left-over").write_bytes(b"from a previous life")
 
     store = FileStore(root, clock=FakeClock())
+    store.prepare()
 
     assert list(store.root.iterdir()) == []
     assert store.size() == 0

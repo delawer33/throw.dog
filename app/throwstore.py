@@ -150,6 +150,15 @@ class ThrowStore:
                 return code
         raise OutOfCodes("could not find an unused code")
 
+    def set_reserved(self, is_reserved: Callable[[str], bool]) -> None:
+        """Point this store at the other one's live codes.
+
+        A setter rather than a constructor argument because the relationship is
+        mutual: each store has to know the other, and one of them has to exist
+        first.
+        """
+        self._is_reserved = is_reserved
+
     def holds(self, code: str) -> bool:
         """Whether ``code`` addresses a live text throw.
 

@@ -227,7 +227,7 @@ class FileStore:
         #: there. Filled under the lock, emptied outside it: a slow filesystem
         #: must never stall a request that only wanted to read a dict.
         self._doomed: list[Path] = []
-        self._prepare_root()
+        self._prepared = False
 
     # -- properties ---------------------------------------------------------
 
@@ -265,6 +265,9 @@ class FileStore:
             raise ValueError("chunks cannot exceed size")
         if chunks * MAX_CHUNK_BYTES < size:
             raise ValueError("chunks too few for the declared size")
+        # First upload of this process: the directory has to exist, and
+        # whatever a previous life left in it has to go.
+        self.prepare()
         now = self._clock()
         upload_id = self._generate_address()
         path = self._path_for(upload_id)
@@ -469,6 +472,15 @@ class FileStore:
 
     # -- housekeeping -------------------------------------------------------
 
+    def set_reserved(self, is_reserved: Callable[[str], bool]) -> None:
+        """Point this store at the other one's live codes.
+
+        A setter rather than a constructor argument because the relationship is
+        mutual: each store has to know the other, and one of them has to exist
+        first.
+        """
+        self._is_reserved = is_reserved
+
     def holds(self, code: str) -> bool:
         """Whether ``code`` addresses a live file throw.
 
@@ -579,16 +591,24 @@ class FileStore:
         digest = hashlib.sha256(upload_id.encode("utf-8")).hexdigest()
         return self._root / digest
 
-    def _prepare_root(self) -> None:
+    def prepare(self) -> None:
         """Make the directory, and empty it if anything survived a restart.
 
         Restart-is-amnesia is the design, not an accident: the metadata that
         made those bytes reachable lived in RAM, so whatever is on disk now is
         unreachable by anyone, including us.
+
+        Called from the app's startup rather than from ``__init__`` because
+        constructing the store must not touch a disk: ``app.main`` builds one
+        at import time, and importing a module is not the moment to create a
+        directory — least of all in a test run or a CI box that has no volume.
         """
+        if self._prepared:
+            return
         if self._root.exists():
             shutil.rmtree(self._root, ignore_errors=True)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._prepared = True
 
 
 def _unlink(path: Path) -> None:

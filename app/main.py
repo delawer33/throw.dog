@@ -23,13 +23,28 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 
 from app.closedaddress import is_closed_address
 from app.codewords import normalize
 from app.csp import FLOOR_POLICY
+from app.filestore import (
+    BadChunk,
+    FileStore,
+    NoSuchUpload,
+    UploadIncomplete,
+)
+from app.filestore import CHUNK_BYTES as FILE_CHUNK_BYTES
+from app.filestore import OutOfCodes as FilesOutOfCodes
+from app.filestore import StoreFull as FilesStoreFull
 from app.gatekeeper import (
     DEFAULT_GLOBAL_MISS_THRESHOLD,
     DEFAULT_GLOBAL_WINDOW_SECONDS,
@@ -55,6 +70,23 @@ from app.throwstore import OutOfCodes, StoreFull, ThrowStore
 
 DEFAULT_TTL_SECONDS = 600
 DEFAULT_MAX_BYTES = 65536
+
+#: Where thrown files live. A subdirectory of the same docker volume the
+#: fake-door lists sit on — no new service, no new mount (ADR 0005).
+DEFAULT_FILES_DIR = "/data/throws"
+
+#: The size ceilings, and the one place the two modes are deliberately not
+#: symmetric. An open file is one we can read and hold on our own disk, so the
+#: plank is low; a closed file is ciphertext we cannot understand, so it is
+#: cheaper to allow more of it. Both are measured in plaintext, the units the
+#: sender can see (ADR 0005).
+DEFAULT_OPEN_FILE_MAX_BYTES = 25 * 1024 * 1024
+DEFAULT_CLOSED_FILE_MAX_BYTES = 100 * 1024 * 1024
+
+#: How much of a file we hand to the socket at a time. Small enough that a
+#: 100 MB download never sits in this process's memory, big enough that the
+#: per-block overhead disappears.
+_DOWNLOAD_BLOCK_BYTES = 256 * 1024
 
 DEFAULT_MISS_DELAY_MS = 1000
 #: Extra delay added on TOP of the base miss delay when the gatekeeper says this
@@ -148,6 +180,107 @@ def encrypted_plaintext_bytes(text: str) -> int | None:
     return max(0, len(raw) - _GCM_IV_BYTES - _GCM_TAG_BYTES)
 
 
+# --- serving the bytes ------------------------------------------------------
+
+#: Sentinel for a Range header that names bytes the file does not have. Distinct
+#: from ``None`` (no Range at all), because the two produce different answers:
+#: one is a whole file, the other a 416.
+UNSATISFIABLE = object()
+
+#: How many bytes of a download go by before we tell the store the ticket is
+#: still moving. A 100 MB file over a slow link outlives the idle window many
+#: times over, and it must not be swept out from under the receiver.
+_TOUCH_EVERY_BYTES = 4 * 1024 * 1024
+
+#: The name we fall back to when there is none to use — a closed file's name is
+#: inside the ciphertext, so this is what the browser sees before the page
+#: decrypts the header and renames the download itself.
+_FALLBACK_FILENAME = "throw.bin"
+
+
+def parse_range(header: str | None, size: int) -> tuple[int, int] | None | object:
+    """Interpret a ``Range`` header: a span, no range at all, or unsatisfiable.
+
+    Only a single byte range is honoured. Resuming a dropped download is the
+    entire reason this exists — multipart ranges are a document-viewer feature,
+    and we never serve a document.
+
+    Anything we do not understand is treated as no range at all: the standard
+    allows it, and starting the file over is a far better answer to a strange
+    header than an error the receiver cannot act on.
+    """
+    if not header:
+        return None
+    units, _, spec = header.partition("=")
+    if units.strip().lower() != "bytes" or "," in spec:
+        return None
+    first, sep, last = spec.strip().partition("-")
+    if not sep:
+        return None
+    try:
+        if not first:
+            # A suffix range: the last N bytes.
+            suffix = int(last)
+            if suffix <= 0:
+                return UNSATISFIABLE
+            return max(0, size - suffix), size - 1
+        start = int(first)
+        end = int(last) if last else size - 1
+    except ValueError:
+        return None
+    if start >= size or end < start:
+        return UNSATISFIABLE
+    return start, min(end, size - 1)
+
+
+def content_disposition(name: str | None) -> str:
+    """An ``attachment`` header for ``name``, safe to put in a header.
+
+    The name came from a sender we do not trust, so it is percent-encoded in
+    the RFC 5987 form and given a plain ASCII fallback. Nothing of the sender's
+    choosing reaches the header raw: a newline in a filename would otherwise be
+    a second header of their choosing.
+    """
+    if not name:
+        return f'attachment; filename="{_FALLBACK_FILENAME}"'
+    encoded = quote(name, safe="")
+    return f"attachment; filename=\"{_FALLBACK_FILENAME}\"; filename*=UTF-8''{encoded}"
+
+
+def _stream_file(files, ticket: str, held, start: int, end: int):
+    """Yield ``[start, end]`` of a checked-out file, block by block.
+
+    Never reads the file into memory: a 100 MB download costs one block at a
+    time on this side, which is the only way a single small box can serve one
+    at all.
+
+    The ticket dies here, at the end, and only if this response carried the
+    file's last byte — not merely "some bytes were served". A bot that opens
+    the connection and hangs up cannot end the download early, and a receiver
+    whose network dropped at 90% comes back to a file that is still there.
+    """
+    remaining = end - start + 1
+    since_touch = 0
+    complete_delivery = end == held.size - 1
+    with open(held.path, "rb") as source:
+        source.seek(start)
+        while remaining > 0:
+            block = source.read(min(_DOWNLOAD_BLOCK_BYTES, remaining))
+            if not block:
+                # The file is shorter than its metadata says. Nothing to do but
+                # stop; the connection ends short and the receiver retries.
+                return
+            remaining -= len(block)
+            since_touch += len(block)
+            if since_touch >= _TOUCH_EVERY_BYTES:
+                since_touch = 0
+                if not files.touch(ticket):
+                    return
+            yield block
+    if complete_delivery:
+        files.complete(ticket)
+
+
 #: One body for every kind of miss — never existed, expired, already read.
 #: Telling them apart would turn code-guessing into a search with feedback.
 MISS_BODY = {"detail": "no such throw"}
@@ -185,6 +318,12 @@ class Settings:
     #: exposed app would let anyone spoof their IP and dodge the per-IP budget.
     trusted_proxy: bool = False
     forwarded_header: str = DEFAULT_FORWARDED_HEADER
+    #: Directory thrown files live in. ``None`` means the module default —
+    #: indirection the tests use to keep the volume path out of a test run.
+    files_dir: str | None = None
+    #: Size ceilings per mode, in the plaintext bytes the sender chose.
+    open_file_max_bytes: int = DEFAULT_OPEN_FILE_MAX_BYTES
+    closed_file_max_bytes: int = DEFAULT_CLOSED_FILE_MAX_BYTES
     #: File the Pro fake-door appends interested emails to (one per line).
     pro_emails_path: str = DEFAULT_PRO_EMAILS_PATH
     #: File the feedback wish-box appends to (one line per record).
@@ -220,6 +359,13 @@ class Settings:
             ),
             gate_max_tracked_ips=int(
                 source.get("THROW_GATE_MAX_TRACKED_IPS", DEFAULT_MAX_TRACKED_IPS)
+            ),
+            files_dir=source.get("THROW_FILES_DIR"),
+            open_file_max_bytes=int(
+                source.get("THROW_OPEN_FILE_MAX_BYTES", DEFAULT_OPEN_FILE_MAX_BYTES)
+            ),
+            closed_file_max_bytes=int(
+                source.get("THROW_CLOSED_FILE_MAX_BYTES", DEFAULT_CLOSED_FILE_MAX_BYTES)
             ),
             trusted_proxy=_env_bool(source.get("THROW_TRUSTED_PROXY"), default=False),
             forwarded_header=source.get("THROW_FORWARDED_HEADER", DEFAULT_FORWARDED_HEADER),
@@ -357,6 +503,7 @@ _SAFE_LOG_PATHS = frozenset(
         "/sitemap.xml",
         "/og.png",
         "/api/throws",
+        "/api/files",
         "/api/pro-interest",
         "/api/feedback",
     }
@@ -382,11 +529,42 @@ def code_pseudonym(code: str, secret: bytes | None = None) -> str:
     return digest[:_CODE_PSEUDONYM_LEN]
 
 
-def log_event(event: str, code: str, *, encrypted: bool | None = None) -> None:
+#: Size buckets for the log. A file's exact length is a fingerprint — paired
+#: with a timestamp it would identify the file across two log lines — so what
+#: is journalled is the order of magnitude and nothing sharper.
+_SIZE_BUCKETS = (
+    (64 * 1024, "64K"),
+    (1024 * 1024, "1M"),
+    (8 * 1024 * 1024, "8M"),
+    (25 * 1024 * 1024, "25M"),
+    (100 * 1024 * 1024, "100M"),
+)
+
+
+def size_bucket(size: int) -> str:
+    """The coarse size class of ``size``, for the log and nowhere else."""
+    for ceiling, label in _SIZE_BUCKETS:
+        if size <= ceiling:
+            return f"<={label}"
+    return f">{_SIZE_BUCKETS[-1][1]}"
+
+
+def log_event(
+    event: str,
+    code: str,
+    *,
+    encrypted: bool | None = None,
+    kind: str | None = None,
+    size: int | None = None,
+) -> None:
     """One machine-readable line per interesting moment, on stdout.
 
     Throw content never appears here — nor does the raw code: only its stable
     pseudonym, so created and read of the same throw still line up.
+
+    ``kind`` and ``size`` say what shape of throw it was and roughly how big.
+    The size is bucketed on purpose: an exact byte count is as identifying as a
+    filename, and a filename never appears here at all.
 
     ``encrypted`` adds the throw's mode when there is one. It is a fact about
     the throw, not about what was in it, and it is the whole of what the funnel
@@ -396,8 +574,10 @@ def log_event(event: str, code: str, *, encrypted: bool | None = None) -> None:
     """
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     mode = "" if encrypted is None else f" mode={'closed' if encrypted else 'open'}"
+    shape = "" if kind is None else f" kind={kind}"
+    bucket = "" if size is None else f" size={size_bucket(size)}"
     print(
-        f"event={event} code={code_pseudonym(code)}{mode} ts={timestamp}",
+        f"event={event} code={code_pseudonym(code)}{mode}{shape}{bucket} ts={timestamp}",
         file=sys.stdout,
         flush=True,
     )
@@ -426,6 +606,8 @@ def sanitize_log_path(raw_path: str) -> str:
     path = raw_path.split("?", 1)[0]
     if path in _SAFE_LOG_PATHS:
         return path
+    if path.startswith("/api/files/"):
+        return _sanitize_file_path(path)
     if path.startswith("/api/throws/"):
         code = path[len("/api/throws/") :]
         return "/api/throws/" + code_pseudonym(normalize(code) or code)
@@ -433,6 +615,26 @@ def sanitize_log_path(raw_path: str) -> str:
     # whole thing rather than risk leaking a code we failed to anticipate.
     segment = path.lstrip("/")
     return "/" + code_pseudonym(normalize(segment) or segment)
+
+
+def _sanitize_file_path(path: str) -> str:
+    """Pseudonymise the upload id or ticket in a file-transfer path.
+
+    Both are secrets of the same weight as a code — whoever reads one out of a
+    log can finish someone else's upload or take their download — so neither
+    may be logged. The route shape around them is kept: ``/api/files/<id>/3``
+    still says "chunk three arrived", which is the whole reason the access log
+    is worth having.
+    """
+    parts = path.split("/")  # ["", "api", "files", ...]
+    tail = parts[3:]
+    if tail[:1] == ["t"] and len(tail) == 2:
+        return "/api/files/t/" + code_pseudonym(tail[1])
+    if len(tail) >= 1:
+        rest = "/".join(tail[1:])
+        pseudonym = "/api/files/" + code_pseudonym(tail[0])
+        return f"{pseudonym}/{rest}" if rest else pseudonym
+    return path
 
 
 class _AccessLogRedactor(logging.Filter):
@@ -472,6 +674,7 @@ def create_app(
     settings: Settings | None = None,
     store: ThrowStore | None = None,
     gatekeeper: Gatekeeper | None = None,
+    files: FileStore | None = None,
 ) -> FastAPI:
     config = settings or Settings.from_env()
     # Point the module-level pseudonym key (used by log_event and, crucially, the
@@ -479,6 +682,14 @@ def create_app(
     global _active_log_hmac_secret
     _active_log_hmac_secret = config.log_hmac_secret
     throws = store or ThrowStore(ttl_seconds=config.ttl_seconds)
+    file_throws = files or FileStore(
+        config.files_dir or DEFAULT_FILES_DIR, ttl_seconds=config.ttl_seconds
+    )
+    # Two stores, one space of two-word codes: a receiver types the words and
+    # cannot know whether a text or a file is behind them, so neither store may
+    # hand out a code the other is already using.
+    throws.set_reserved(file_throws.holds)
+    file_throws.set_reserved(throws.holds)
     gate = gatekeeper or Gatekeeper(
         window_seconds=config.gate_window_seconds,
         miss_budget=config.gate_miss_budget,
@@ -502,7 +713,15 @@ def create_app(
             while True:
                 await asyncio.sleep(config.sweep_interval_seconds)
                 throws.purge_expired()
+                # Files are swept on the same beat, and for a stronger reason:
+                # an expired text is bytes in RAM, an expired file is bytes on
+                # a disk that a flood is trying to fill.
+                file_throws.purge_expired()
 
+        # Startup is where the volume is touched, not import: whatever files
+        # a previous life left behind are unreachable (their metadata was in
+        # that process's RAM) and go now.
+        file_throws.prepare()
         sweeper = asyncio.create_task(sweep_forever())
         try:
             yield
@@ -520,6 +739,7 @@ def create_app(
     )
     app.state.settings = config
     app.state.store = throws
+    app.state.files = file_throws
     app.state.gatekeeper = gate
 
     # Public launch: the homepage, legal pages and SEO landings ARE indexable;
@@ -678,6 +898,37 @@ def create_app(
                 body["enc"] = ENC_SCHEME
             return JSONResponse(body)
 
+        # Not in the text store: it may be a file. Consulted second and only
+        # on a text miss, so the text path — the common one — pays nothing for
+        # the existence of files.
+        grant = file_throws.take(canonical) if canonical is not None else None
+        if grant is not None:
+            gate.record(ip, ReadOutcome.HIT)
+            log_event(
+                "read",
+                canonical,
+                encrypted=grant.encrypted,
+                kind="file",
+                size=grant.size,
+            )
+            # The bytes are NOT here: what comes back is a ticket. The code is
+            # already dead — one throw, one receiver — and the ticket is what
+            # survives the minutes a file takes and the dropped connection in
+            # the middle of them (ADR 0005).
+            body: dict[str, object] = {
+                "kind": "file",
+                "ticket": grant.ticket,
+                "url": f"/api/files/t/{grant.ticket}",
+                "size": grant.size,
+            }
+            if grant.name is not None:
+                body["name"] = grant.name
+            if grant.mime is not None:
+                body["mime"] = grant.mime
+            if grant.enc is not None:
+                body["enc"] = grant.enc
+            return JSONResponse(body)
+
         if closed:
             # A miss on a closed address is not evidence of code-guessing: the
             # space is ~68 bits and nobody types it, so it cannot be enumerated
@@ -693,6 +944,44 @@ def create_app(
         gate.record(ip, ReadOutcome.MISS)
         tarpitted = not gate.allow(ip)
         return await miss(tarpitted=tarpitted)
+
+    @app.get("/api/files/t/{ticket}")
+    async def download_file(ticket: str, request: Request) -> Response:
+        # No tarpit and no miss delay here. The gate exists to slow down the
+        # guessing of two-word codes; a ticket is 68 random bits handed to one
+        # receiver, so there is nothing to guess and nothing to charge to a
+        # budget that an honest reader shares with the NAT around them.
+        held = file_throws.checkout(ticket)
+        if held is None:
+            return JSONResponse(MISS_BODY, status_code=404)
+
+        span = parse_range(request.headers.get("range"), held.size)
+        if span is UNSATISFIABLE:
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{held.size}"},
+            )
+        start, end = (0, held.size - 1) if span is None else span
+        length = end - start + 1
+
+        headers = {
+            # Always a download, never a page. An open file is content we did
+            # not write being served from our domain; rendering it inline would
+            # turn the relay into a host for whatever someone uploads (ADR 0005).
+            "Content-Disposition": content_disposition(held.name),
+            "Content-Length": str(length),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+        }
+        if span is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{held.size}"
+
+        return StreamingResponse(
+            _stream_file(file_throws, ticket, held, start, end),
+            status_code=206 if span is not None else 200,
+            media_type="application/octet-stream",
+            headers=headers,
+        )
 
     @app.post("/api/pro-interest")
     async def pro_interest(request: Request) -> JSONResponse:
