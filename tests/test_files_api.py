@@ -679,3 +679,92 @@ def test_an_upload_that_changes_network_frees_its_own_slot_not_a_strangers(limit
         second = roaming.post("/api/files", json={"size": 4, "chunks": 1}, headers=mobile)
         assert second.status_code == 201
         assert roaming.post("/api/files", json={"size": 4, "chunks": 1}, headers=mobile).status_code == 429
+
+
+def _put_in_pieces(app, upload: str, payload: bytes, *, piece: int) -> int:
+    """PUT a chunk the way a real connection delivers it: a piece at a time."""
+    import asyncio
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "http",
+        "path": f"/api/files/{upload}/0",
+        "raw_path": f"/api/files/{upload}/0".encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/octet-stream"),
+            (b"content-length", str(len(payload)).encode()),
+        ],
+        "client": ("10.0.0.7", 5000),
+        "server": ("testserver", 80),
+        "app": app,
+    }
+    parts = [payload[at : at + piece] for at in range(0, len(payload), piece)]
+    status = {}
+
+    async def receive():
+        if parts:
+            return {
+                "type": "http.request",
+                "body": parts.pop(0),
+                "more_body": bool(parts),
+            }
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status["code"] = message["status"]
+
+    asyncio.run(app(scope, receive, send))
+    return status["code"]
+
+
+class _Chatty(FileStore):
+    """A store that remembers being told an upload is still moving."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.touches = 0
+
+    def touch_upload(self, upload_id: str) -> bool:
+        self.touches += 1
+        return super().touch_upload(upload_id)
+
+
+def test_a_chunk_crawling_in_is_not_swept_out_from_under_its_sender(tmp_path):
+    # A chunk counts as activity only once it has fully arrived, so 4 MB over a
+    # phone's uplink looks exactly like a sender who walked away. The idle
+    # window must mean "we stopped hearing from you", not "you were too slow",
+    # and that needs the upload to report while the body is still coming in.
+    store = _Chatty(tmp_path / "files", clock=FakeClock())
+    store.prepare()
+    payload = b"x" * (1024 * 1024)
+    with TestClient(create_app(TEST_SETTINGS, files=store)) as client:
+        upload = client.post(
+            "/api/files", json={"size": len(payload), "chunks": 1}
+        ).json()["upload"]
+        # Driven straight at the ASGI app: the test client hands a body over in
+        # one piece, and one piece is exactly the case this fix is not about.
+        status = _put_in_pieces(client.app, upload, payload, piece=64 * 1024)
+
+    assert status == 204
+    assert store.touches >= 3, "a megabyte went by in silence"
+
+
+def test_a_forgotten_upload_hears_about_it_the_moment_it_speaks(tmp_path):
+    # The other half: touching is not a way to keep a swept upload alive.
+    clock = FakeClock()
+    store = FileStore(tmp_path / "files", clock=clock, upload_idle_seconds=120.0)
+    store.prepare()
+    upload = store.begin(size=64, chunks=1)
+
+    assert store.touch_upload(upload) is True
+    clock.advance(121.0)
+    store.purge_expired()
+    assert store.touch_upload(upload) is False
+    assert store.touch_upload("never-existed") is False

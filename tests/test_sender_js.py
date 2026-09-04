@@ -67,8 +67,21 @@ globalThis.document = {
   }
 };
 
+// How many chunk PUTs the network eats before it behaves, and how: a 502 the
+// sender should ride out, or a thrown fetch, which is what a dropped
+// connection actually looks like in a browser.
+let flaky = Number(process.env.FLAKY || 0);
+const FLAKY_AS = process.env.FLAKY_AS || '502';
+let putAttempts = 0;
+
 globalThis.fetch = function (url, options) {
   if (options.method === 'PUT') {
+    putAttempts += 1;
+    if (flaky > 0) {
+      flaky -= 1;
+      if (FLAKY_AS === 'drop') { return Promise.reject(new Error('offline')); }
+      return Promise.resolve({ status: Number(FLAKY_AS), ok: false });
+    }
     // A sealed chunk: keep the bytes themselves, that is the whole point.
     posted.push({ url: url, bytes: Array.from(options.body) });
     return Promise.resolve({ status: 204, ok: true });
@@ -105,7 +118,9 @@ function fakeFile(name) {
 const SCENARIO = process.env.SCENARIO;
 const SECRET = process.env.SECRET;
 
-function settle() { return new Promise(function (r) { setTimeout(r, 200); }); }
+function settle() {
+  return new Promise(function (r) { setTimeout(r, Number(process.env.SETTLE_MS || 200)); });
+}
 
 async function main() {
   PAGE_SCRIPT();
@@ -149,6 +164,7 @@ async function main() {
   process.stdout.write(JSON.stringify({
     posted: posted,
     posts: posted.length,
+    putAttempts: putAttempts,
     url: posted.length ? posted[0].url : null,
     body: posted.length ? posted[0].body : null,
     shownUrl: url,
@@ -297,3 +313,26 @@ def test_the_progress_a_sender_watches_counts_their_file_not_our_packaging(scrip
 
     assert wire > plain, "the control: the two numbers really do differ"
     assert out["progpct"] == "100% · " + str(plain) + " B"
+
+
+@pytest.mark.parametrize("how", ["502", "drop"])
+def test_a_chunk_the_network_ate_is_sent_again_and_the_throw_survives(script, how):
+    # Fifty megabytes over a phone's uplink is minutes of someone's evening.
+    # Losing all of it to one dropped connection near the end is the worst
+    # thing this page can do, and the server is resumable by construction —
+    # it appends in order and knows which piece it wants next.
+    out = run(script, "file", FLAKY="2", FLAKY_AS=how, SETTLE_MS="6000")
+
+    assert out["putAttempts"] == 4, "two eaten, two that landed"
+    assert out["doneHidden"] is False, "the throw still went through"
+    assert out["error"] == ""
+
+
+def test_a_refusal_the_server_meant_is_not_repeated(script):
+    # A 4xx is a real answer — too big, too many, wrong piece — and asking
+    # again would only be noise on a link that is already struggling.
+    out = run(script, "file", FLAKY="1", FLAKY_AS="413", SETTLE_MS="6000")
+
+    assert out["putAttempts"] == 1, "the page argued with a real answer"
+    assert out["shownUrl"] == "", "no link, because nothing was thrown"
+    assert out["error"] != ""

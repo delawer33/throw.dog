@@ -389,6 +389,24 @@ class FileStore:
                 upload.touched_at = self._clock()
                 return upload.received_bytes
 
+    def touch_upload(self, upload_id: str) -> bool:
+        """Push a stalled upload's deadline back mid-chunk. False if gone.
+
+        The mirror of :meth:`touch` on the download side, and needed for the
+        same reason: a chunk is only counted as activity once it has fully
+        arrived, so a 4 MB piece crawling in over a phone's uplink looks
+        exactly like a sender who walked away. Without this the idle window
+        is not "how long we wait for a sender" but "how fast a sender must
+        be", and a slow enough link could never finish at all.
+        """
+        now = self._clock()
+        with self._lock:
+            upload = self._uploads.get(upload_id)
+            if upload is None:
+                return False
+            upload.touched_at = now
+            return True
+
     def finish(self, upload_id: str) -> Filed:
         """Turn a completed upload into a live throw and return its address.
 

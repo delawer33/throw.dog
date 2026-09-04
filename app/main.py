@@ -204,6 +204,11 @@ UNSATISFIABLE = Unsatisfiable()
 #: times over, and it must not be swept out from under the receiver.
 _TOUCH_EVERY_BYTES = 4 * 1024 * 1024
 
+#: The same on the way in, and much finer: a whole chunk is 4 MB, so a cadence
+#: measured in chunks would never fire inside one. This is small enough that
+#: any link still moving at all reports before the idle window runs out.
+_TOUCH_UPLOAD_EVERY_BYTES = 256 * 1024
+
 #: The name we fall back to when there is none to use — a closed file's name is
 #: inside the ciphertext, so this is what the browser sees before the page
 #: decrypts the header and renames the download itself.
@@ -1194,11 +1199,21 @@ def create_app(
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit() and int(declared) > _MAX_CHUNK_BODY:
             return JSONResponse({"detail": "chunk is too big"}, status_code=413)
+        # A chunk only counts as activity once it has fully arrived, and over a
+        # phone's uplink one 4 MB piece can take longer than the whole idle
+        # window — so the upload says "still moving" as the body comes in, the
+        # way the download already does on its way out.
         body = bytearray()
+        since_touch = 0
         async for piece in request.stream():
             body.extend(piece)
             if len(body) > _MAX_CHUNK_BODY:
                 return JSONResponse({"detail": "chunk is too big"}, status_code=413)
+            since_touch += len(piece)
+            if since_touch >= _TOUCH_UPLOAD_EVERY_BYTES:
+                since_touch = 0
+                if not file_throws.touch_upload(upload):
+                    return JSONResponse(MISS_BODY, status_code=404)
         try:
             await asyncio.to_thread(
                 file_throws.write_chunk, upload, index, bytes(body)

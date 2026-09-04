@@ -1061,6 +1061,7 @@ _UPLOAD_JS: Final = r"""
 // A piece is ``{size, make}`` rather than a blob: the closed sender seals each
 // chunk only when it is about to go, so a whole file is never encrypted into
 // memory at once. The open sender's ``make`` just hands back the slice.
+var TD_CHUNK_TRIES = 4, TD_CHUNK_BACKOFF_MS = 1000;
 function tdUpload(start, pieces, at){
   var total = pieces.reduce(function (sum, piece) { return sum + piece.size; }, 0);
   var upload;
@@ -1068,6 +1069,35 @@ function tdUpload(start, pieces, at){
     if (response.status === 413) { throw new Error('too-big'); }
     if (response.status === 429) { throw new Error('busy'); }
     throw new Error('failed');
+  }
+  // A chunk is retried, and the whole upload is not. Fifty megabytes over a
+  // phone's uplink is minutes of someone's evening, and losing all of it to
+  // one dropped connection near the end is the worst thing this page can do.
+  // The server is resumable by construction — it appends in order and knows
+  // which piece it wants next — so sending the same index again is exactly
+  // what it expects. Only a hiccup is worth repeating: a 4xx is a real answer
+  // (too big, too many, wrong piece) and repeating it would just be noise.
+  function put(index, body, left){
+    if (left === undefined) { left = TD_CHUNK_TRIES; }
+    return fetch('/api/files/' + upload + '/' + index, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: body
+    }).then(function (response) {
+      if (response.ok) { return response; }
+      if (left > 1 && response.status >= 500) { return again(index, body, left); }
+      fail(response);
+    }, function () {
+      if (left > 1) { return again(index, body, left); }
+      throw new Error('net');
+    });
+  }
+  function again(index, body, left){
+    // Backing off, because a server that just answered 502 is not helped by
+    // the same 4 MB arriving again a millisecond later.
+    var wait = TD_CHUNK_BACKOFF_MS * (TD_CHUNK_TRIES - left + 1);
+    return new Promise(function (go) { setTimeout(go, wait); })
+      .then(function () { return put(index, body, left - 1); });
   }
   return fetch('/api/files', {
     method: 'POST',
@@ -1086,13 +1116,8 @@ function tdUpload(start, pieces, at){
         return chain.then(function () {
           return piece.make();
         }).then(function (body) {
-          return fetch('/api/files/' + upload + '/' + index, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: body
-          }).then(null, function () { throw new Error('net'); });
-        }).then(function (response) {
-          if (!response.ok) { fail(response); }
+          return put(index, body);
+        }).then(function () {
           sent += piece.size;
           at(sent, total);
         });
