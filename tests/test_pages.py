@@ -637,3 +637,26 @@ def test_terms_say_what_a_file_throw_actually_is():
     assert "One file per throw" in page
     assert "25 MB" in page and "100 MB" in page
     assert "never displayed in" in page, "an open file is a download, not a page"
+
+
+def test_the_button_style_says_how_it_lays_out():
+    # This one shipped: .btn set padding, width and a vertical margin but never
+    # a display. A <button> is inline-block already, so every button on the
+    # site looked right — but the receiver's download is an <a>, and an inline
+    # box ignores width and vertical margin while its padding paints outside
+    # the line. The link came down on top of the file's own name.
+    block = re.search(r"\n  \.btn \{(.*?)\n  \}", RECEIVER_PAGE, re.S)
+    assert block, "the .btn rule moved; this guard needs to move with it"
+    assert "display:" in block.group(1)
+
+
+def test_the_file_a_receiver_came_for_arrives_on_its_own_plate():
+    # The name and the size are two facts about one object, not a sentence
+    # with a dot in the middle, and the object gets the same kind of plate the
+    # sender's code does — it is the payload of the page.
+    page = render_receiver("en")
+    assert 'class="fileplate"' in page
+    assert 'id="filename"' in page and 'id="filesize"' in page
+    assert "'filename').textContent = name || T.fileNoName" in page, (
+        "a closed file whose header would not open still has a size to show"
+    )

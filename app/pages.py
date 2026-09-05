@@ -98,11 +98,17 @@ _STYLE: Final = """
   }
   textarea:focus { border-color: var(--ink); background: #fff; }
 
+  /* display is not decoration here: a <button> is inline-block already, but an
+     <a class="btn"> is not, and an inline box ignores width and vertical
+     margin while its padding paints outside the line — which is how the
+     download link came to sit on top of the file's name. */
   .btn {
     font: 900 18px system-ui, sans-serif; text-transform: uppercase; letter-spacing: 1.5px;
     background: var(--red); color: #fff; border: 3px solid var(--ink); border-radius: 12px;
     box-shadow: 6px 6px 0 var(--ink); cursor: pointer;
     transition: transform .08s, box-shadow .08s; padding: 16px;
+    display: inline-block; box-sizing: border-box; text-align: center;
+    text-decoration: none;
   }
   .btn.wide { width: 100%; margin-top: 14px; }
   .btn:hover { background: #ff6c5d; }
@@ -268,6 +274,29 @@ _STYLE: Final = """
   .progfill { height: 100%; width: 0; background: var(--mustard); transition: width .18s; }
   .progpct { font: 800 13px system-ui, sans-serif; margin-top: 8px; opacity: .8; }
 
+  /* The file the receiver came for, on the same kind of plate the sender's
+     code arrives on: this is the payload of the page, and it should read as
+     one object rather than as two lines of text above a button. */
+  .fileplate {
+    /* Top-aligned, not centred: a long name wraps to several lines, and an
+       icon floating in the middle of them reads as decoration instead of as
+       a label on the thing itself. */
+    display: flex; align-items: flex-start; gap: 13px;
+    background: var(--mustard); border: 3px solid var(--ink); border-radius: 12px;
+    box-shadow: 6px 6px 0 var(--ink); padding: 14px 16px;
+    margin: 12px 0 22px; transform: rotate(-1deg);
+  }
+  .fileplate .paper { flex: none; margin-top: 1px; }
+  /* min-width:0 or a long name would push the plate wider than the card
+     instead of wrapping inside it — the flex default is not to shrink below
+     the longest unbreakable word. */
+  .fileplate .filemeta { min-width: 0; }
+  .filename {
+    font: 900 clamp(15px, 3.2vw, 19px)/1.25 system-ui, sans-serif;
+    overflow-wrap: anywhere;
+  }
+  .filesize { font: 800 13px system-ui, sans-serif; opacity: .72; margin-top: 3px; }
+
   /* SEO landing prose: the same .prose card the legal pages use, spaced to sit
      below the chips. The copy is part of the page, not a page of its own. */
   .card.seo { margin-top: 34px; }
@@ -299,6 +328,14 @@ _PAW: Final = """<svg class="paw" width="30" height="30" viewBox="0 0 34 34" ari
   <ellipse cx="10" cy="9" rx="4" ry="5"/><ellipse cx="24" cy="9" rx="4" ry="5"/>
   <ellipse cx="4" cy="17" rx="3.4" ry="4.4"/><ellipse cx="30" cy="17" rx="3.4" ry="4.4"/>
   <path d="M17 14c6 0 10 4.5 10 9.5 0 4-3 6.5-10 6.5S7 27.5 7 23.5C7 18.5 11 14 17 14z"/></g></svg>"""
+
+#: The file's own sticker. Drawn rather than borrowed so it sits in the same
+#: hand as the bone and the paw — white fill, one ink stroke, no shading.
+_PAPER: Final = """<svg class="paper" width="30" height="35" viewBox="0 0 34 40" aria-hidden="true">
+  <path d="M3.5 4.5a2 2 0 0 1 2-2H20l11 11v24a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2v-33z"
+    fill="#fff" stroke="#181207" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M20 2.5v11h11" fill="none" stroke="#181207" stroke-width="3"
+    stroke-linejoin="round"/></svg>"""
 
 _BONE: Final = """<svg class="bone" width="48" height="21" viewBox="0 0 46 20" aria-hidden="true">
   <path d="M8 4a5 5 0 0 1 5 5h20a5 5 0 1 1 8-4 5 5 0 1 1-4 8H17a5 5 0 1 1-8-4 5 5 0 0 1-1-5z"
@@ -1751,7 +1788,13 @@ _RECEIVER_TMPL: Final = _HEAD_NO_SCRIPT + """<body>
 
       <div id="fileresult" hidden>
         <p class="donelabel">@@fileReady@@</p>
-        <p class="progname" id="filename"></p>
+        <div class="fileplate">
+          """ + _PAPER + """
+          <div class="filemeta">
+            <div class="filename" id="filename"></div>
+            <div class="filesize" id="filesize"></div>
+          </div>
+        </div>
         <a class="btn wide" id="download" download>@@downloadBtn@@</a>
         <p class="hint">@@fileHint@@</p>
       </div>
@@ -1826,8 +1869,10 @@ var T = @@__T__@@;
     var link = document.getElementById('download');
     link.href = href;
     if (name) { link.setAttribute('download', name); }
-    document.getElementById('filename').textContent =
-      (name || '') + (name ? ' · ' : '') + tdSize(size);
+    // A closed file whose header we could not read has no name to show; the
+    // plate then says what it can, which is how big the thing is.
+    document.getElementById('filename').textContent = name || T.fileNoName;
+    document.getElementById('filesize').textContent = tdSize(size);
     status.hidden = true;
     document.getElementById('fileresult').hidden = false;
     link.click();
@@ -2010,6 +2055,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "uploadBusy": "Too many uploads from here. Wait a minute and try again.",
         "fileReady": "The file is on its way to your downloads:",
         "fileHint": "This link works until the download finishes, then it is gone.",
+        "fileNoName": "Your file",
         "downloadBtn": "download",
         "downloadFailed": "The download stopped. Try the button again.",
     },
@@ -2084,6 +2130,7 @@ STRINGS: Final[dict[str, dict[str, str]]] = {
         "uploadBusy": "Слишком много загрузок отсюда. Подожди минуту и попробуй снова.",
         "fileReady": "Файл уходит в загрузки:",
         "fileHint": "Ссылка живёт до конца скачивания, потом исчезает.",
+        "fileNoName": "Твой файл",
         "downloadBtn": "скачать",
         "downloadFailed": "Скачивание оборвалось. Нажми кнопку ещё раз.",
     },

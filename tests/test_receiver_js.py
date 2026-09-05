@@ -121,7 +121,8 @@ setup().then(function () {
     downloadHref: els.download ? els.download.href : null,
     downloadName: els.download ? els.download.download : null,
     downloadClicks: els.download ? els.download.clicks : null,
-    fileLabel: els.filename ? els.filename.textContent : null
+    fileLabel: els.filename ? els.filename.textContent : null,
+    fileSize: els.filesize ? els.filesize.textContent : null
   }));
 }).catch(function (e) {
   process.stderr.write(String(e && e.stack));
@@ -256,4 +257,6 @@ def test_an_open_file_is_handed_over_rather_than_shown(script):
     assert out["downloadHref"] == "/api/files/t/t"
     assert out["downloadName"] == "holiday.mp4"
     assert out["downloadClicks"] == 1, "the download starts by itself"
-    assert "holiday.mp4" in out["fileLabel"] and "5 MB" in out["fileLabel"]
+    # The name and the size are two facts on the plate, not one string.
+    assert out["fileLabel"] == "holiday.mp4"
+    assert out["fileSize"] == "5 MB"
