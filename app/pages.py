@@ -785,15 +785,32 @@ def lang_switch(href: str, label: str) -> str:
         f'    <a href="{href}" hreflang="{"ru" if "/ru" in href else "en"}">{label}</a>'
     )
 
-#: Quiet entry points into the two landing clusters. Homepage only: the spec
-#: joins the clusters through the homepage, never directly — so no landing,
-#: receiver or /closed page carries these (a landing linking the other
-#: cluster, or itself, would be exactly the direct join the spec rules out).
-_FOOTER_GUIDES: Final = """
+#: The head of each landing cluster, per language. A homepage links into its
+#: own language's clusters and no further: sending a Russian reader to an
+#: English guide is a worse answer, and it also left every Russian landing
+#: without a link pointing at it — reachable only by following an hreflang
+#: from an English page, which is a path no reader takes and a crawler is
+#: slow to.
+_CLUSTER_HEADS: Final = {
+    "en": ("/send-text-from-pc-to-phone", "/one-time-secret"),
+    "ru": ("/ru/perekinut-tekst-s-kompa-na-telefon", "/ru/odnorazovaya-zapiska"),
+}
+
+
+def _footer_guides(lang: str) -> str:
+    """Quiet entry points into this language's two landing clusters.
+
+    Homepage only: the spec joins the clusters through the homepage, never
+    directly — so no landing, receiver or /closed page carries these (a landing
+    linking the other cluster, or itself, would be exactly the direct join the
+    spec rules out).
+    """
+    device, secret = _CLUSTER_HEADS[lang]
+    return f"""
     <span aria-hidden="true">·</span>
-    <a href="/send-text-from-pc-to-phone">@@footerGuideDevice@@</a>
+    <a href="{device}">@@footerGuideDevice@@</a>
     <span aria-hidden="true">·</span>
-    <a href="/one-time-secret">@@footerGuideSecret@@</a>"""
+    <a href="{secret}">@@footerGuideSecret@@</a>"""
 
 
 def _mode_row(*, closed: bool) -> str:
@@ -2234,7 +2251,7 @@ def _render(
     out = out.replace("@@landingBody@@", landing_body)
     out = out.replace("@@modeRedirect@@", "" if is_landing else _MODE_REDIRECT_SCRIPT)
     out = out.replace("@@isLanding@@", "true" if is_landing else "false")
-    out = out.replace("@@footerGuides@@", _FOOTER_GUIDES if footer_guides else "")
+    out = out.replace("@@footerGuides@@", _footer_guides(lang) if footer_guides else "")
     out = out.replace("@@langSwitch@@", lang_switch_html)
     # The browser needs the same "is this a closed address?" rule the server
     # uses, and one drifting copy of it would silently break the guarantee that

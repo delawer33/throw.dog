@@ -19,7 +19,7 @@ from app.landings import (
     SITEMAP_XML,
 )
 from app.main import create_app
-from app.pages import ANALYTICS_HOST, ROBOTS_TXT
+from app.pages import ANALYTICS_HOST, ROBOTS_TXT, render_sender
 
 PAGE_BUDGET = 100 * 1024
 
@@ -354,3 +354,33 @@ def test_landing_copy_never_promises_files_yet():
         prose = html.split('class="card prose seo"')[1].split("<footer")[0]
         assert "upload" not in prose.lower(), path
         assert "файл" not in prose.lower(), path
+
+
+def test_each_homepage_points_into_its_own_language():
+    # The Russian homepage used to send readers — and crawlers — into the
+    # English guides, which left every Russian landing with nothing linking to
+    # it: the only way in was an hreflang from an English page, a path no
+    # reader takes and a crawler is slow to follow.
+    en = render_sender("en")
+    ru = render_sender("ru")
+
+    assert 'href="/send-text-from-pc-to-phone"' in en
+    assert 'href="/one-time-secret"' in en
+    assert 'href="/ru/perekinut-tekst-s-kompa-na-telefon"' in ru
+    assert 'href="/ru/odnorazovaya-zapiska"' in ru
+    # And neither homepage advertises the other language's guides.
+    assert 'href="/one-time-secret"' not in ru
+    assert 'href="/ru/odnorazovaya-zapiska"' not in en
+
+
+def test_every_landing_has_something_linking_to_it():
+    # A page only the sitemap knows about is a page a crawler may never fetch.
+    pages = {landing.path: LANDING_PAGES[landing.path] for landing in LANDINGS}
+    reachable = set()
+    for html in (render_sender("en"), render_sender("ru"), *pages.values()):
+        for landing in LANDINGS:
+            if f'href="{landing.path}"' in html:
+                reachable.add(landing.path)
+
+    orphans = sorted(set(pages) - reachable)
+    assert not orphans, f"nothing links to: {orphans}"
