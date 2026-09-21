@@ -215,6 +215,11 @@ _STYLE: Final = """
   .prose p { margin-bottom: 12px; }
   .prose p:last-child { margin-bottom: 0; }
   .prose a { color: var(--ink); font-weight: 800; }
+  /* the point-by-point table on the comparison landing */
+  .prose table { width: 100%; border-collapse: collapse; margin: 4px 0 14px; font-size: 14px; }
+  .prose th, .prose td { text-align: left; vertical-align: top; padding: 6px 8px 6px 0; border-bottom: 2px solid var(--ink); }
+  .prose th { font-weight: 900; }
+  .prose td:first-child { font-weight: 800; }
   .abuse {
     display: inline-block; font-weight: 800; background: var(--mustard);
     border: 2px solid var(--ink); border-radius: 8px; padding: 1px 8px;
@@ -796,6 +801,15 @@ _CLUSTER_HEADS: Final = {
     "ru": ("/ru/perekinut-tekst-s-kompa-na-telefon", "/ru/odnorazovaya-zapiska"),
 }
 
+#: One more homepage link, where a single landing carries most of the
+#: search demand: Search Console (Sept 2026) put three quarters of all
+#: impressions on the Privnote comparison, on page four. A link from the
+#: homepage is the cheapest authority we can hand it. Label is not
+#: localised because the page is English-only.
+_FOOTER_SPOTLIGHT: Final = {
+    "en": ("/privnote-alternative", "Privnote alternative"),
+}
+
 
 def _footer_guides(lang: str) -> str:
     """Quiet entry points into this language's two landing clusters.
@@ -806,11 +820,17 @@ def _footer_guides(lang: str) -> str:
     spec rules out).
     """
     device, secret = _CLUSTER_HEADS[lang]
-    return f"""
+    out = f"""
     <span aria-hidden="true">·</span>
     <a href="{device}">@@footerGuideDevice@@</a>
     <span aria-hidden="true">·</span>
     <a href="{secret}">@@footerGuideSecret@@</a>"""
+    if lang in _FOOTER_SPOTLIGHT:
+        href, label = _FOOTER_SPOTLIGHT[lang]
+        out += f"""
+    <span aria-hidden="true">·</span>
+    <a href="{href}">{label}</a>"""
+    return out
 
 
 def _mode_row(*, closed: bool) -> str:
@@ -2428,6 +2448,8 @@ def _legal_page(
     <a href="/send-text-from-pc-to-phone">PC ↔ phone</a>
     <span aria-hidden="true">·</span>
     <a href="/one-time-secret">one-time secret</a>
+    <span aria-hidden="true">·</span>
+    <a href="/privnote-alternative">Privnote alternative</a>
   </footer>
 </div>
 </body>

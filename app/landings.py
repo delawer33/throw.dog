@@ -315,11 +315,11 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     Landing(
         slug="self-destructing-note",
         alternate="odnorazovaya-zapiska",
-        title="Self-Destructing Note — Deletes Itself After One Read | throw.dog",
+        title="Self-Destructing Note or Message — Gone After One Read | throw.dog",
         description=(
-            "Write a note that destroys itself: one read or 10 minutes, "
-            "whichever comes first. Encrypted on your device — nobody, "
-            "including us, can read it or bring it back."
+            "Write a self-destructing note or message online: one read or "
+            "10 minutes, whichever comes first. Encrypted on your device — "
+            "nobody, including us, can read it or bring it back."
         ),
         tagline_a="Notes that",
         tagline_b="self-destruct",
@@ -350,11 +350,19 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     the page's security policy makes the browser enforce that rule rather
     than trust our manners.</p>
 
+    <h2>Note, message, text — one tool</h2>
+    <p>Call it a self-destructing message, a disappearing note, a self-deleting
+    note or a one-time note — people search for all of them, and they all
+    mean this: text that exists for one reader and then doesn't. Unlike the
+    timed messages inside Telegram, WhatsApp or iMessage, this one needs no
+    app on either side and no shared contact: it's a website, the link or QR
+    opens in any browser, and the other person never learns your number.</p>
+
     <h2>When it's the right tool</h2>
     <p>A door code for the guest, a Wi-Fi password for the visitor, the thing
-    you'd rather say once and have disappear. Call it a self-deleting note or
-    a self-destructing one — either way it works online, in any browser, with
-    nothing to install. Write it, hand over the link or the QR, done — the
+    you'd rather say once and have disappear. Self-destructing note or
+    self-destructing message — either way it works online, in any browser,
+    with nothing to install. Write it, hand over the link or the QR, done — the
     note does its own shredding.</p>""",
     ),
     Landing(
@@ -393,6 +401,31 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     minutes, and are never written to disk. The full source is public, at
     github.com/delawer33/throw.dog.</p>
 
+    <h2>Privnote vs throw.dog, point by point</h2>
+    <p>As of September 2026, going by what each site itself says. Privnote
+    has done one thing well for years — this is not a takedown, it's the
+    list of where the two actually differ, so you can pick the one that fits
+    the note in your hand.</p>
+    <table>
+      <tr><th></th><th>Privnote</th><th>throw.dog</th></tr>
+      <tr><td>Encrypted in the browser, key after the <code>#</code></td><td>yes</td><td>yes</td></tr>
+      <tr><td>Ads on the note pages</td><td>yes</td><td>none</td></tr>
+      <tr><td>Scripts loaded from outside</td><td>ads, analytics</td><td>zero — the browser enforces it</td></tr>
+      <tr><td>Source code</td><td>closed</td><td>public, on GitHub</td></tr>
+      <tr><td>An unread note waits</td><td>up to 30 days</td><td>10 minutes</td></tr>
+      <tr><td>Gone on first read</td><td>by default</td><td>always</td></tr>
+      <tr><td>Hand over by QR, no link sent</td><td>no</td><td>yes</td></tr>
+      <tr><td>Extra password on the note</td><td>optional</td><td>no</td></tr>
+      <tr><td>Read receipt by email</td><td>optional</td><td>no — no email, no account, no log</td></tr>
+      <tr><td>Files</td><td>no</td><td>yes, one file up to 100 MB</td></tr>
+      <tr><td>Sign-up</td><td>none</td><td>none</td></tr>
+    </table>
+    <p>If you need a note to wait a week for its reader, or a password on top
+    of the link, Privnote has that and this site doesn't — on purpose. Most
+    other Privnote alternatives (onetimesecret, yopass and the rest) are
+    worth putting through the same four checks above; the open-source ones
+    let you.</p>
+
     <h2>What's genuinely different</h2>
     <p>Two things you won't find in most Privnote-style services. The QR: the
     result card leads with one, so you can hand a secret to the person next to
@@ -405,7 +438,9 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     <p>In-browser encryption — anyone's — can't protect you from the site
     that serves the encrypting page itself; we say so in our Privacy note
     rather than hide behind the word «encrypted». Notes are text up to
-    64&nbsp;KB; files aren't here yet.</p>""",
+    64&nbsp;KB; a file goes the same way, sealed in the browser chunk by
+    chunk and stored as ciphertext for the same 10 minutes — one file, up to
+    100&nbsp;MB.</p>""",
     ),
     # --- русский кластер: устройства (открытый режим) -------------------------
     Landing(
@@ -570,9 +605,9 @@ LANDINGS: Final[tuple[Landing, ...]] = (
         alternate="self-destructing-note",
         title="Одноразовая записка онлайн — самоуничтожается после прочтения | throw.dog",
         description=(
-            "Записка, которая уничтожает себя: одно прочтение или 10 минут, "
-            "что раньше. Шифруется у тебя на устройстве — прочитать или "
-            "вернуть её не может никто, включая нас."
+            "Одноразовая записка онлайн, бесплатно и без регистрации: одно "
+            "прочтение или 10 минут — и её нет. Шифруется у тебя на "
+            "устройстве, прочитать или вернуть не может никто, включая нас."
         ),
         tagline_a="Одноразовая",
         tagline_b="записка",
@@ -606,7 +641,13 @@ LANDINGS: Final[tuple[Landing, ...]] = (
     <p>Код от подъезда гостю, пароль от вайфая, то, что хочется сказать один
     раз и чтобы оно исчезло. Самоудаляющаяся или самоуничтожающаяся — как ни
     называй, работает онлайн, в любом браузере, ставить ничего не надо.
-    Написал, отдал ссылку или QR — записка сама себя уничтожит.</p>""",
+    Написал, отдал ссылку или QR — записка сама себя уничтожит.</p>
+
+    <h2>Если искали что-то вроде Privnote</h2>
+    <p>Это оно — самоуничтожающаяся записка по одноразовой ссылке, — только
+    без рекламы на страницах записки, без единого скрипта со стороны и с
+    открытым исходным кодом. Плюс QR, чтобы отдать секрет из рук в руки, не
+    отправляя ссылку вообще. Бесплатно, без регистрации, без приложения.</p>""",
     ),
 )
 
@@ -775,7 +816,7 @@ INDEXABLE_PATHS: Final[tuple[str, ...]] = (
 #: When the landing set last changed. Hand-bumped, because a build timestamp
 #: would tell crawlers every deploy rewrote every page — which is a lie that
 #: costs crawl budget. Bump it when the copy actually changes.
-LANDINGS_LASTMOD: Final = "2026-09-03"
+LANDINGS_LASTMOD: Final = "2026-09-21"
 
 SITEMAP_XML: Final = (
     '<?xml version="1.0" encoding="UTF-8"?>\n'
