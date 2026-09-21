@@ -194,6 +194,21 @@ def test_landings_are_served_and_indexable(client):
         assert "noindex" not in response.text, path
 
 
+def test_head_answers_like_get_without_a_body(client):
+    # FastAPI does not add HEAD to GET routes, and a 405 on HEAD reads as a
+    # dead page to link checkers and preview bots that probe before fetching.
+    for path in (*INDEXABLE_PATHS, "/sitemap.xml", "/robots.txt", "/og.png"):
+        full = client.get(path)
+        head = client.head(path)
+        assert head.status_code == full.status_code == 200, path
+        assert head.content == b"", path
+        assert head.headers["content-type"] == full.headers["content-type"], path
+        assert head.headers["content-length"] == full.headers["content-length"], path
+        assert ("X-Robots-Tag" in head.headers) == ("X-Robots-Tag" in full.headers)
+    # Everything else keeps its own answer — a receiver page is still noindex.
+    assert client.head("/closed").headers["X-Robots-Tag"] == "noindex, nofollow"
+
+
 def test_a_landing_slug_never_burns_a_throw(client):
     # The routes are registered before the /{code} catch-all; a GET of a
     # landing must render the landing, not a receiver page for a dead code.
@@ -253,6 +268,7 @@ def test_legal_pages_are_not_link_graph_dead_ends(client):
         body = client.get(path).text
         assert 'href="/send-text-from-pc-to-phone"' in body, path
         assert 'href="/one-time-secret"' in body, path
+        assert 'href="/privnote-alternative"' in body, path
 
 
 def test_localised_pages_admit_that_they_vary(client):
@@ -349,11 +365,30 @@ def test_secret_cluster_copy_stays_honest():
     assert "github.com/delawer33/throw.dog" in comparison
 
 
-def test_landing_copy_never_promises_files_yet():
+def test_landing_copy_does_not_deny_the_files_that_shipped():
+    # Files went live in September 2026; a landing still saying they are not
+    # here is the lied-to intent the spec warns about, in the other direction.
     for path, html in LANDING_PAGES.items():
         prose = html.split('class="card prose seo"')[1].split("<footer")[0]
-        assert "upload" not in prose.lower(), path
-        assert "файл" not in prose.lower(), path
+        assert "aren't here yet" not in prose, path
+        assert "файлов пока нет" not in prose, path
+
+
+def test_the_comparison_page_compares_point_by_point():
+    # User story 3 of the spec: a searcher for "privnote alternative" wants a
+    # table, not adjectives — and it must stay within the closed shell (no
+    # outside URL to Privnote, however tempting).
+    html = LANDING_PAGES["/privnote-alternative"]
+    assert "<table>" in html
+    assert html.count("<tr>") >= 8
+    assert "privnote.com" not in html
+
+
+def test_the_spotlight_landing_is_linked_from_the_homepage_and_legal_pages():
+    # The page with most of the search demand gets a homepage link (EN only:
+    # the page is English). The Russian homepage stays inside its language.
+    assert 'href="/privnote-alternative"' in render_sender("en")
+    assert 'href="/privnote-alternative"' not in render_sender("ru")
 
 
 def test_each_homepage_points_into_its_own_language():

@@ -905,6 +905,23 @@ def create_app(
         "/og.png",
     }
 
+    # FastAPI registers GET routes as GET only (plain Starlette would add
+    # HEAD), so every HEAD came back 405. Link checkers, uptime monitors and
+    # some preview bots probe with HEAD before they GET; a 405 reads as a
+    # dead page. Answer HEAD as the GET without its body — the status,
+    # Content-Length and every other header stay those of the GET.
+    @app.middleware("http")
+    async def head_as_get(request: Request, call_next):
+        if request.scope["method"] != "HEAD":
+            return await call_next(request)
+        request.scope["method"] = "GET"
+        response = await call_next(request)
+        return Response(
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=None,
+        )
+
     @app.middleware("http")
     async def no_index(request: Request, call_next):
         response = await call_next(request)
