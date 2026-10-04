@@ -421,7 +421,7 @@ def test_every_landing_has_something_linking_to_it():
     assert not orphans, f"nothing links to: {orphans}"
 
 
-# --- second RU wave (GSC, Oct 2026) -------------------------------------------
+# --- Russian comparison, message and note pages -------------------------------------------
 
 
 def test_the_privnote_pages_are_a_true_pair():
@@ -448,9 +448,9 @@ def test_the_russian_homepage_spotlights_the_russian_comparison():
 
 
 def test_the_one_time_message_page_owns_up_to_messenger_timers():
-    # The spec once called «одноразовое сообщение» a Telegram trap; the
-    # autocomplete also carries «…сайт» and «…онлайн», and those readers are
-    # ours — provided the page says plainly what the messengers already do.
+    # Much of «одноразовое сообщение» is about Telegram; the «…сайт» and
+    # «…онлайн» readers are ours only if the page says plainly what the
+    # messengers already do.
     html = LANDING_PAGES["/ru/odnorazovoe-soobshchenie"]
     prose = html.split('class="card prose seo"')[1].split("<footer")[0]
     assert "Telegram" in prose
@@ -462,17 +462,25 @@ def test_the_note_page_holds_its_neighbouring_wordings():
     # «зашифрованная записка» are the same intent and live inside the note page
     # rather than on near-copies of it.
     prose = LANDING_PAGES["/ru/odnorazovaya-zapiska"].split('class="card prose seo"')[1]
-    for word in ("заметк", "секретн", "зашифрованн"):
-        assert word in prose, word
+    for phrase in (
+        "одноразовые заметки онлайн",
+        "секретная записка онлайн",
+        "зашифрованная записка",
+    ):
+        assert phrase in prose.replace("\n    ", " ").lower(), phrase
 
 
-def test_lastmod_is_per_page_and_never_newer_than_the_change():
+def test_lastmod_is_per_page_and_a_real_date():
     # A blanket bump would claim every page changed; the crawler learns to
     # ignore lastmod that always moves. Each URL carries its own date.
+    from datetime import date as Date
+
     from app.landings import LASTMOD
 
     assert set(LASTMOD) == set(INDEXABLE_PATHS)
     for path, date in LASTMOD.items():
+        # A malformed date is a sitemap parse error in Search Console.
+        assert Date.fromisoformat(date).isoformat() == date, path
         assert f"<loc>https://throw.dog{path}</loc><lastmod>{date}</lastmod>" in SITEMAP_XML
     assert LASTMOD["/ru/analog-privnote"] == "2026-10-04"
     assert LASTMOD["/ru/odnorazovaya-zapiska"] == "2026-10-04"

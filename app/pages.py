@@ -804,9 +804,9 @@ _CLUSTER_HEADS: Final = {
 #: One more homepage link, where a single landing carries most of the
 #: search demand: Search Console (Sept 2026) put three quarters of all
 #: impressions on the Privnote comparison, on page four. A link from the
-#: homepage is the cheapest authority we can hand it. The Russian homepage
-#: spotlights the Russian counterpart (Oct 2026): Russian pages are the ones
-#: that rank on page one, so that is where a link turns into clicks.
+#: homepage is the cheapest authority we can hand it. Each homepage
+#: spotlights its own language's comparison: Russian pages rank closer to
+#: page one, where a link turns into clicks soonest.
 _FOOTER_SPOTLIGHT: Final = {
     "en": ("/privnote-alternative", "Privnote alternative"),
     "ru": ("/ru/analog-privnote", "Аналог Privnote"),

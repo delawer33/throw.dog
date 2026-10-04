@@ -1437,7 +1437,7 @@ def create_app(
             closed_sender_page(request.headers.get("accept-language")), localised=True
         )
 
-    # SEO landings: static English documents, one route per slug, registered
+    # SEO landings: static documents (EN at the root, RU under /ru/), one route per slug, registered
     # before the ``/{code}`` catch-all like every other named page. Each is
     # served under a policy computed from its own bytes; the secret-cluster
     # pages rendered from the closed-sender template therefore carry the same
