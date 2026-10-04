@@ -16,6 +16,10 @@ link when you can deliver one.
   We only ever hold ciphertext. The cost: no two-word code — you can't say
   a key out loud — so it's link and QR only.
 
+How it compares to Privnote, point by point:
+[throw.dog/privnote-alternative](https://throw.dog/privnote-alternative)
+(in Russian: [throw.dog/ru/analog-privnote](https://throw.dog/ru/analog-privnote)).
+
 Why both modes exist, and why a closed throw can't have a spoken code, is
 written down in [docs/adr/](docs/adr/) (Russian) — short answer: a key
 derived from two words would be ~20 bits, and that's theater, not E2E.

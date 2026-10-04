@@ -45,7 +45,7 @@ def test_the_sprint_scope_is_pinned():
     assert len(_EN) == 8
     assert len(tuple(l for l in _EN if not l.closed)) == 4
     assert len(tuple(l for l in _EN if l.closed)) == 4
-    assert len(_RU) == 5
+    assert len(_RU) == 7
     for landing in LANDINGS:
         assert "file" not in landing.slug
     # Every Russian page lives under /ru/, every English one at the root.
@@ -152,7 +152,7 @@ def test_no_network_loaded_code_runs_on_a_secret_landing():
     # /closed and the receiver: no loaded script, no analytics, no funnel
     # calls, no URL that fetches anything. Same assertions as
     # test_pages.test_no_network_loaded_code_runs_where_a_key_lives.
-    assert len(CLOSED_LANDING_PAGES) == 6
+    assert len(CLOSED_LANDING_PAGES) == 8
     for html in CLOSED_LANDING_PAGES:
         assert "src=" not in html.lower()
         assert ANALYTICS_HOST not in html
@@ -224,7 +224,7 @@ def test_sitemap_lists_exactly_the_indexable_pages(client):
     assert "X-Robots-Tag" not in response.headers
     for path in INDEXABLE_PATHS:
         assert f"<loc>https://throw.dog{path}</loc>" in response.text
-    assert response.text.count("<loc>") == len(INDEXABLE_PATHS) == 17
+    assert response.text.count("<loc>") == len(INDEXABLE_PATHS) == 19
 
 
 def test_every_indexable_page_carries_a_link_preview_card(client):
@@ -419,3 +419,62 @@ def test_every_landing_has_something_linking_to_it():
 
     orphans = sorted(set(pages) - reachable)
     assert not orphans, f"nothing links to: {orphans}"
+
+
+# --- second RU wave (GSC, Oct 2026) -------------------------------------------
+
+
+def test_the_privnote_pages_are_a_true_pair():
+    # «privnote ru», «privnote analog» are live Russian queries; the Russian
+    # page answers the same question as the English comparison, so the two
+    # are one page for two readers — the one EN page with real demand gets
+    # its hreflang partner.
+    ru = next(l for l in LANDINGS if l.slug == "analog-privnote")
+    assert ru.lang == "ru" and ru.closed
+    assert ru.alternate == "privnote-alternative"
+    html = LANDING_PAGES[ru.path]
+    assert "<table>" in html
+    assert html.count("<tr>") >= 8
+    assert "privnote.com" not in html
+    assert "github.com/delawer33/throw.dog" in html
+    # Same honesty line as the English page, in Russian.
+    assert "не защитит от сайта" in html
+
+
+def test_the_russian_homepage_spotlights_the_russian_comparison():
+    ru = render_sender("ru")
+    assert 'href="/ru/analog-privnote"' in ru
+    assert 'href="/ru/analog-privnote"' not in render_sender("en")
+
+
+def test_the_one_time_message_page_owns_up_to_messenger_timers():
+    # The spec once called «одноразовое сообщение» a Telegram trap; the
+    # autocomplete also carries «…сайт» and «…онлайн», and those readers are
+    # ours — provided the page says plainly what the messengers already do.
+    html = LANDING_PAGES["/ru/odnorazovoe-soobshchenie"]
+    prose = html.split('class="card prose seo"')[1].split("<footer")[0]
+    assert "Telegram" in prose
+    assert "WhatsApp" in prose
+
+
+def test_the_note_page_holds_its_neighbouring_wordings():
+    # One query = one page: «одноразовые заметки онлайн», «секретная записка»,
+    # «зашифрованная записка» are the same intent and live inside the note page
+    # rather than on near-copies of it.
+    prose = LANDING_PAGES["/ru/odnorazovaya-zapiska"].split('class="card prose seo"')[1]
+    for word in ("заметк", "секретн", "зашифрованн"):
+        assert word in prose, word
+
+
+def test_lastmod_is_per_page_and_never_newer_than_the_change():
+    # A blanket bump would claim every page changed; the crawler learns to
+    # ignore lastmod that always moves. Each URL carries its own date.
+    from app.landings import LASTMOD
+
+    assert set(LASTMOD) == set(INDEXABLE_PATHS)
+    for path, date in LASTMOD.items():
+        assert f"<loc>https://throw.dog{path}</loc><lastmod>{date}</lastmod>" in SITEMAP_XML
+    assert LASTMOD["/ru/analog-privnote"] == "2026-10-04"
+    assert LASTMOD["/ru/odnorazovaya-zapiska"] == "2026-10-04"
+    # Untouched English device pages keep the date they actually last changed.
+    assert LASTMOD["/send-text-from-pc-to-phone"] == "2026-09-21"
