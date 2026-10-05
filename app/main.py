@@ -635,6 +635,16 @@ _active_log_hmac_secret = _DEFAULT_LOG_HMAC_SECRET
 #: is a receiver code (``/red-fox``) or a read (``/api/throws/red-fox``) and
 #: must be pseudonymised before it reaches the access log. The SEO landings
 #: are registered routes like ``/terms`` — public documents, never codes.
+#: Yandex Webmaster ownership proof, served verbatim at the site root.
+YANDEX_VERIFICATION_PATH = "/yandex_1a3df817bdbb807e.html"
+YANDEX_VERIFICATION_HTML = """<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    </head>
+    <body>Verification: 1a3df817bdbb807e</body>
+</html>
+"""
+
 _SAFE_LOG_PATHS = frozenset(
     {
         "/",
@@ -645,6 +655,7 @@ _SAFE_LOG_PATHS = frozenset(
         "/robots.txt",
         "/sitemap.xml",
         "/og.png",
+        YANDEX_VERIFICATION_PATH,
         "/api/throws",
         "/api/files",
         "/api/pro-interest",
@@ -956,6 +967,12 @@ def create_app(
     @app.get("/sitemap.xml")
     async def sitemap() -> Response:
         return Response(SITEMAP_XML, media_type="application/xml")
+
+    @app.get(YANDEX_VERIFICATION_PATH)
+    async def yandex_verification() -> HTMLResponse:
+        # Yandex Webmaster proves site ownership by fetching this file from
+        # the root. The token is public by design — anyone can fetch it.
+        return HTMLResponse(YANDEX_VERIFICATION_HTML)
 
     @app.get("/og.png")
     async def og_image() -> Response:

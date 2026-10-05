@@ -486,3 +486,13 @@ def test_lastmod_is_per_page_and_a_real_date():
     assert LASTMOD["/ru/odnorazovaya-zapiska"] == "2026-10-04"
     # Untouched English device pages keep the date they actually last changed.
     assert LASTMOD["/send-text-from-pc-to-phone"] == "2026-09-21"
+
+
+def test_yandex_webmaster_verification_file_is_served(client):
+    # Webmaster proves ownership by fetching this exact file from the root.
+    # It must not be swallowed by the /{code} catch-all as a dead throw.
+    response = client.get("/yandex_1a3df817bdbb807e.html")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Verification: 1a3df817bdbb807e" in response.text
+    assert client.head("/yandex_1a3df817bdbb807e.html").status_code == 200
